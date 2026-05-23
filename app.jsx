@@ -220,39 +220,30 @@ Si no podés leer algún campo, poné null.`;
 
 async function extraerDatosFotoBase64(base64, mediaType) {
   const apiKey = localStorage.getItem("cv_apikey") || "";
-  if (!apiKey) throw new Error("Falta la API key. Andá a Config y agregala.");
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+  if (!apiKey) throw new Error("Falta la API key de Gemini. Andá a Config y agregala.");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  const resp = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
-      messages: [{ role: "user", content: [
-        { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
-        { type: "text", text: PROMPT_EXTRACCION }
-      ]}]
+      contents: [{ parts: [
+        { inline_data: { mime_type: mediaType, data: base64 } },
+        { text: PROMPT_EXTRACCION }
+      ]}],
+      generationConfig: { temperature: 0.1 }
     })
   });
   let data;
-  try {
-    data = await resp.json();
-  } catch(e) {
-    const raw = await resp.text().catch(() => "no text");
-    throw new Error("HTTP " + resp.status + " | " + raw.slice(0, 120));
-  }
-  // Mostrar respuesta completa si hay error
+  try { data = await resp.json(); } catch(e) { throw new Error("HTTP " + resp.status); }
   if (!resp.ok || data.error) {
-    throw new Error("API " + resp.status + ": " + JSON.stringify(data).slice(0, 150));
+    throw new Error("API " + resp.status + ": " + (data.error?.message || JSON.stringify(data).slice(0, 120)));
   }
-  const text = data.content?.find(c => c.type === "text")?.text || "";
-  if (!text) throw new Error("Sin texto. Estructura: " + JSON.stringify(data).slice(0, 150));
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  if (!text) throw new Error("Respuesta vacía. Revisá la API key.");
   const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error("Sin JSON. Texto: " + text.slice(0, 100));
-  try {
-    return JSON.parse(match[0]);
-  } catch(parseErr) {
-    throw new Error("JSON inválido: " + match[0].slice(0, 100));
-  }
+  if (!match) throw new Error("Sin JSON en respuesta: " + text.slice(0, 80));
+  try { return JSON.parse(match[0]); }
+  catch(e) { throw new Error("JSON inválido: " + match[0].slice(0, 80)); }
 }
 
 function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso }) {
@@ -725,8 +716,8 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div className="card" style={{ borderLeft: "3px solid #F59E0B" }}>
-        <p style={{ fontSize: 11, color: "#F59E0B", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>API Key de Anthropic</p>
-        <p style={{ fontSize: 12, color: "#888", marginBottom: 10 }}>Necesaria para que la IA lea los comprobantes. Obtené la tuya gratis en <strong style={{color:"#F0EDE8"}}>console.anthropic.com</strong></p>
+        <p style={{ fontSize: 11, color: "#F59E0B", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>API Key de Gemini (gratis)</p>
+        <p style={{ fontSize: 12, color: "#888", marginBottom: 10 }}>Gratis en <strong style={{color:"#F0EDE8"}}>aistudio.google.com/apikey</strong> → "Create API key" → copiá y pegá acá</p>
         <div style={{ display: "flex", gap: 8 }}>
           <input className="input" type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-ant-..." style={{ flex: 1 }} />
           <button className="btn btn-primary btn-sm" onClick={saveApiKey}>Guardar</button>
