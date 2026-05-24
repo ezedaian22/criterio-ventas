@@ -350,8 +350,8 @@ const PROMPT_EXTRACCION = `Analizá este presupuesto/comprobante de venta de rop
 {
   "cliente": "nombre del cliente o null",
   "fecha": "fecha en formato YYYY-MM-DD o null",
-  "total": número total de la venta como número (sin descuento aplicado si hay uno separado) o null,
-  "totalConDescuento": número total final después del descuento o null,
+ "total": subtotal antes de descuento o null,
+"totalConDescuento": el número final más abajo del remito después de restar descuentos. Si hay números tachados o intermedios ignoralos, tomá siempre el último total visible o null,
   "items": [{"descripcion": "...", "cantidad": N, "precio": N, "total": N}],
   "descuento": número de descuento aplicado o null,
   "notas": "cualquier nota relevante o null"
