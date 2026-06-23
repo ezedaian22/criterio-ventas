@@ -958,7 +958,13 @@ function Historial({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
                 <p style={{ fontSize: 11, color: "#6B4A3E", marginTop: 2 }}>{v.fecha} · {vend?.nombre}</p>
                 {v.nota && <p style={{ fontSize: 11, color: "#7A5848", marginTop: 1 }}>{v.nota}</p>}
               </div>
-              <span style={{ fontSize: 15, fontWeight: 700, flexShrink: 0 }}>{fmtPeso(v.total)}</span>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+                <span style={{ fontSize: 15, fontWeight: 700 }}>{fmtPeso(v.total)}</span>
+                {v.pagado
+                  ? <span style={{ fontSize: 10, color: "#10B981", fontWeight: 600 }}>✓ pagada</span>
+                  : <span style={{ fontSize: 10, color: "#F87171", fontWeight: 600 }}>● a pagar</span>
+                }
+              </div>
             </div>
           );
         })}
