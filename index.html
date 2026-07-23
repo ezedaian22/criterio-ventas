@@ -901,6 +901,7 @@ function Historial({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
   const [filtroVendedora, setFiltroVendedora] = useState("all");
   const [filtroAnio, setFiltroAnio] = useState("all");
   const [filtroMes, setFiltroMes] = useState("all");
+  const [busqueda, setBusqueda] = useState("");
 
   const allMonthKeys = [...new Set(ventas.map(v => getMonthKey(v.fecha)))].sort().reverse();
   const anios = [...new Set(allMonthKeys.map(m => m.split("-")[0]))].sort().reverse();
@@ -913,11 +914,52 @@ function Historial({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
     const mk = getMonthKey(v.fecha);
     if (filtroAnio !== "all" && !mk.startsWith(filtroAnio)) return false;
     if (filtroMes !== "all" && mk.split("-")[1] !== filtroMes) return false;
+    if (busqueda.trim() && !(v.cliente || "").toLowerCase().includes(busqueda.trim().toLowerCase())) return false;
     return true;
   });
 
+  // Análisis del cliente buscado
+  const clienteBuscado = busqueda.trim();
+  const ventasCliente = clienteBuscado
+    ? ventas.filter(v => (v.cliente || "").toLowerCase().includes(clienteBuscado.toLowerCase()))
+    : [];
+  const vendedorasCliente = clienteBuscado
+    ? [...new Map(ventasCliente.map(v => {
+        const vend = vendedoras.find(vv => vv.id === (v.vendedora_id || v.vendedoraId));
+        return [vend?.id, vend];
+      })).values()].filter(Boolean)
+    : [];
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div>
+        <label style={{ fontSize: 12, color: "#5A3828", marginBottom: 6, display: "block" }}>Buscar cliente</label>
+        <input
+          className="input"
+          type="text"
+          value={busqueda}
+          onChange={e => setBusqueda(e.target.value)}
+          placeholder="Nombre del cliente..."
+        />
+        {clienteBuscado && ventasCliente.length > 0 && (
+          <div style={{ marginTop: 8, background: "#FFF0E8", borderRadius: 8, padding: "10px 12px" }}>
+            <p style={{ fontSize: 12, fontWeight: 600, color: "#5A3828", marginBottom: 4 }}>
+              {ventasCliente.length} venta{ventasCliente.length !== 1 ? "s" : ""} encontrada{ventasCliente.length !== 1 ? "s" : ""}
+            </p>
+            {vendedorasCliente.length > 1 && (
+              <p style={{ fontSize: 11, color: "#F87171", fontWeight: 600, marginBottom: 4 }}>
+                ⚠ Atendido por más de un vendedor</p>
+            )}
+            <p style={{ fontSize: 12, color: "#6B4A3E" }}>
+              Vendedor{vendedorasCliente.length !== 1 ? "as" : "a"}: {vendedorasCliente.map(vv => vv.nombre).join(", ")}
+            </p>
+          </div>
+        )}
+        {clienteBuscado && ventasCliente.length === 0 && (
+          <p style={{ fontSize: 12, color: "#7A5848", marginTop: 6 }}>Sin resultados para "{clienteBuscado}"</p>
+        )}
+      </div>
+
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
         <div>
           <label style={{ fontSize: 12, color: "#5A3828", marginBottom: 6, display: "block" }}>Vendedora</label>
