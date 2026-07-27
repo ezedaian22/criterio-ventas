@@ -136,6 +136,20 @@ function App({ onLogout }) {
   // Load all data from Supabase on mount
   useEffect(() => {
     const loadData = async () => {
+      // Cargar keys desde Supabase primero
+      try {
+        const { data: cfgData } = await sb.from("config").select("value").eq("key", "gemini_keys").single();
+        if (cfgData?.value) {
+          const lines = cfgData.value.split("\n").map(k => k.trim()).filter(Boolean);
+          if (lines.length > 0) {
+            window.__geminiPrimaryKey = lines[0];
+            window.__geminiExtraKeys = lines.slice(1).join("\n");
+            localStorage.setItem("cv_apikey", lines[0]);
+            localStorage.setItem("cv_extrakeys", lines.slice(1).join("\n"));
+          }
+        }
+      } catch(e) { console.log("Keys no cargadas desde Supabase"); }
+
       setLoading(true);
       try {
         const [v, vend, c, p] = await Promise.all([
@@ -369,8 +383,8 @@ const BACKUP_API_KEY = "AIzaSyDaAuhseWd2ktPgwi0w1AzKjHRoQyIIHg8";
 let lastKeyUsed = 0; // 0 = primary, 1 = backup
 
 async function extraerDatosFotoBase64(base64, mediaType) {
-  const primaryKey = localStorage.getItem("cv_apikey") || "";
-  const savedExtra = localStorage.getItem("cv_extrakeys") || "";
+  const primaryKey = localStorage.getItem("cv_apikey") || window.__geminiPrimaryKey || "";
+  const savedExtra = localStorage.getItem("cv_extrakeys") || window.__geminiExtraKeys || "";
   const extraKeys = savedExtra.split("\n").map(k => k.trim()).filter(Boolean);
   const keys = [primaryKey, BACKUP_API_KEY, ...extraKeys].filter(Boolean);
   if (keys.length === 0) throw new Error("Falta la API key de Gemini. Andá a Config y agregala.");
@@ -1329,13 +1343,21 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
     setNueva({ nombre: "", comision: "", color: "#8B5CF6" });
   };
 
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem("cv_apikey") || "");
-  const [extraApiKeys, setExtraApiKeys] = useState(() => localStorage.getItem("cv_extrakeys") || "");
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("cv_apikey") || window.__geminiPrimaryKey || "");
+  const [extraApiKeys, setExtraApiKeys] = useState(() => localStorage.getItem("cv_extrakeys") || window.__geminiExtraKeys || "");
   const [apiKeySaved, setApiKeySaved] = useState(false);
+  const [savingKey, setSavingKey] = useState(false);
 
-  const saveApiKey = () => {
+  const saveApiKey = async () => {
+    setSavingKey(true);
     localStorage.setItem("cv_apikey", apiKey);
     localStorage.setItem("cv_extrakeys", extraApiKeys);
+    window.__geminiPrimaryKey = apiKey;
+    window.__geminiExtraKeys = extraApiKeys;
+    // Guardar en Supabase
+    const allKeys = [apiKey, extraApiKeys].filter(Boolean).join("\n");
+    await sb.from("config").upsert({ key: "gemini_keys", value: allKeys });
+    setSavingKey(false);
     setApiKeySaved(true);
     setTimeout(() => setApiKeySaved(false), 2000);
   };
@@ -1353,9 +1375,9 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
         </div>
         <p style={{ fontSize: 12, color: "#5A3828", marginBottom: 6 }}>Keys adicionales (una por línea, AIzaSy... o AQ.Ab8...)</p>
         <textarea className="input" value={extraApiKeys} onChange={e => setExtraApiKeys(e.target.value)} placeholder={"AIzaSy...\nAQ.Ab8..."} rows={5} style={{ width: "100%", resize: "vertical", marginBottom: 10 }} />
-        <button className="btn btn-primary btn-sm" onClick={saveApiKey}>Guardar</button>
-        {apiKeySaved && <p style={{ fontSize: 12, color: "#10B981", marginTop: 6 }}>✓ Guardadas</p>}
-        {!localStorage.getItem("cv_apikey") && <p style={{ fontSize: 12, color: "#F87171", marginTop: 6 }}>⚠ Sin API key — la lectura de fotos no funcionará</p>}
+        <button className="btn btn-primary btn-sm" onClick={saveApiKey} disabled={savingKey}>{savingKey ? "Guardando..." : "Guardar"}</button>
+        {apiKeySaved && <p style={{ fontSize: 12, color: "#10B981", marginTop: 6 }}>✓ Guardadas en la nube</p>}
+        {!apiKey && !extraApiKeys && <p style={{ fontSize: 12, color: "#F87171", marginTop: 6 }}>⚠ Sin API key — la lectura de fotos no funcionará</p>}
       </div>
 
       <div className="card">
