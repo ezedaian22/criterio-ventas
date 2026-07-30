@@ -160,6 +160,14 @@ function matchearArticulo(codigoLeido, descLeida, catalogo, aliases = {}) {
   }
 
   // 3. Solo descripcion
+  // Empate tecnico: si el 2do candidato esta a menos de 0.08 del 1ro, la descripcion
+  // NO alcanza para decidir. No se elige ninguno: hay que mirarlo si o si.
+  const segundo = ranking[1] ? ranking[1].s : 0;
+  const empatados = mejorScore > 0 && (mejorScore - segundo) < 0.08;
+
+  if (mejorScore >= 0.45 && empatados) {
+    return { ...base, estado: "ambiguo", score: mejorScore, candidatos: top3 };
+  }
   if (mejorScore >= 0.45) return { ...base, ...mejor, estado: "similar", score: mejorScore, candidatos: top3 };
   return { ...base, estado: "sin_match", score: mejorScore, candidatos: top3 };
 }
@@ -664,6 +672,7 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases }) {
     solo_codigo: { color: "#10B981", txt: "✓ por código" },
     similar:     { color: "#A85D43", txt: "≈ similar a" },
     revisar:     { color: "#F59E0B", txt: "⚠ chequear este art" },
+    ambiguo:     { color: "#F59E0B", txt: "⚠ dos artículos posibles — elegir" },
     sin_match:   { color: "#B3261E", txt: "✕ sin match" },
   };
 
@@ -706,7 +715,7 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases }) {
                 {x.m.codigo && x.m.costo_total === null ? " · ⚠ sin costo cargado" : ""}
               </p>
             )}
-            {x.m && (x.m.estado === "revisar" || x.m.estado === "sin_match" || x.m.estado === "similar") && x.m.candidatos.length > 0 && (
+            {x.m && (x.m.estado === "revisar" || x.m.estado === "sin_match" || x.m.estado === "similar" || x.m.estado === "ambiguo") && x.m.candidatos.length > 0 && (
               <p style={{ fontSize: 10, color: "#7A5848", margin: "2px 0 0 0" }}>
                 Opciones: {x.m.candidatos.map(cd => `${cd.codigo} (${Math.round(cd.score * 100)}%)`).join(" · ")}
               </p>
@@ -1892,10 +1901,12 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
                   {(pruebaCod || pruebaDesc) && (() => {
                     const m = matchearArticulo(pruebaCod, pruebaDesc, cat, aliases || {});
                     const colores = { ok: "#10B981", alias: "#10B981", solo_codigo: "#10B981",
-                                      similar: "#A85D43", revisar: "#F59E0B", sin_match: "#B3261E" };
+                                      similar: "#A85D43", revisar: "#F59E0B",
+                                      ambiguo: "#F59E0B", sin_match: "#B3261E" };
                     const textos = { ok: "✓ Match seguro", alias: "✓ Por alias aprendido",
                                      solo_codigo: "✓ Por código (sin descripción)",
                                      similar: "≈ Similar a", revisar: "⚠ Chequear este art",
+                                     ambiguo: "⚠ Dos artículos posibles — hay que elegir",
                                      sin_match: "✕ Sin match" };
                     return (
                       <div style={{ background: "#FFFFFF", borderRadius: 8, padding: 10 }}>
