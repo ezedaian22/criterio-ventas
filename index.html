@@ -20,6 +20,18 @@ const supabaseUrl = "https://rbgcvgrofqbhefdsueui.supabase.co";
 const supabaseKey = "sb_publishable_Ok8QpA9Cans3ND8dM0mdXg_n8eIOdU1";
 const sb = supabase.createClient(supabaseUrl, supabaseKey);
 
+// Segundo cliente: proyecto de Costos (solo lectura del catalogo)
+const costosUrl = "https://dptfgqdybjuhsehyhuyy.supabase.co";
+const costosKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRwdGZncWR5Ymp1aHNlaHlodXl5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgyNDM4OTEsImV4cCI6MjA5MzgxOTg5MX0.Pek-PptrKcUYh6jCKocnhqO4umbUx5LWtgwrE4WzjF4";
+const sbCostos = supabase.createClient(costosUrl, costosKey, { db: { schema: "costos" } });
+
+// Diagnostico: trae el catalogo de articulos con sus costos
+async function traerCatalogoCostos() {
+  const { data, error } = await sbCostos.from("costo_articulo").select("*").limit(1000);
+  if (error) return { ok: false, error: error.message || JSON.stringify(error), rows: [] };
+  return { ok: true, error: null, rows: data || [] };
+}
+
 // Fuzzy matching para nombres de clientes
 function similaridad(a, b) {
   a = a.toLowerCase().trim();
@@ -1383,6 +1395,18 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
   const [apiKeySaved, setApiKeySaved] = useState(false);
   const [savingKey, setSavingKey] = useState(false);
 
+  // ── Test de conexion al catalogo de Costos ──
+  const [testCat, setTestCat] = useState(null);
+  const [testingCat, setTestingCat] = useState(false);
+
+  const probarCatalogo = async () => {
+    setTestingCat(true);
+    setTestCat(null);
+    const r = await traerCatalogoCostos();
+    setTestCat(r);
+    setTestingCat(false);
+  };
+
   const saveApiKey = async () => {
     setSavingKey(true);
     localStorage.setItem("cv_apikey", apiKey);
@@ -1413,6 +1437,47 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
         <button className="btn btn-primary btn-sm" onClick={saveApiKey} disabled={savingKey}>{savingKey ? "Guardando..." : "Guardar"}</button>
         {apiKeySaved && <p style={{ fontSize: 12, color: "#10B981", marginTop: 6 }}>✓ Guardadas en la nube</p>}
         {!apiKey && !extraApiKeys && <p style={{ fontSize: 12, color: "#F87171", marginTop: 6 }}>⚠ Sin API key — la lectura de fotos no funcionará</p>}
+      </div>
+
+      {/* ── Test de conexion al catalogo de Costos ── */}
+      <div className="card">
+        <p style={{ fontSize: 11, color: "#6B4A3E", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 10 }}>Catálogo de Costos</p>
+        <p style={{ fontSize: 12, color: "#5A3828", marginBottom: 12 }}>
+          Probá la conexión al proyecto de Costos para ver si Ventas puede leer el catálogo de artículos.
+        </p>
+        <button className="btn btn-primary btn-sm" onClick={probarCatalogo} disabled={testingCat}>
+          {testingCat ? "Probando..." : "Probar conexión"}
+        </button>
+
+        {testCat && !testCat.ok && (
+          <div style={{ marginTop: 12, background: "#FFE8E4", borderRadius: 8, padding: 12 }}>
+            <p style={{ fontSize: 13, fontWeight: 700, color: "#B3261E", marginBottom: 4 }}>✕ No se pudo leer el catálogo</p>
+            <p style={{ fontSize: 11, color: "#7A2E28", wordBreak: "break-word" }}>{testCat.error}</p>
+          </div>
+        )}
+
+        {testCat && testCat.ok && (
+          <div style={{ marginTop: 12 }}>
+            <p style={{ fontSize: 13, fontWeight: 700, color: "#10B981", marginBottom: 8 }}>
+              ✓ Conectado — {testCat.rows.length} artículos
+            </p>
+            {testCat.rows.length > 0 && (
+              <div>
+                <p style={{ fontSize: 11, color: "#7A5848", marginBottom: 6 }}>
+                  Columnas: {Object.keys(testCat.rows[0]).join(", ")}
+                </p>
+                <div style={{ background: "#FFFFFF", borderRadius: 8, padding: 10, maxHeight: 260, overflowY: "auto" }}>
+                  {testCat.rows.slice(0, 15).map((r, i) => (
+                    <pre key={i} style={{ fontSize: 10, color: "#5A3828", margin: 0, padding: "4px 0", borderBottom: "1px solid #F0E0D8", whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "monospace" }}>
+                      {JSON.stringify(r)}
+                    </pre>
+                  ))}
+                </div>
+                <p style={{ fontSize: 11, color: "#7A5848", marginTop: 6 }}>Mostrando los primeros 15 de {testCat.rows.length}</p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="card">
