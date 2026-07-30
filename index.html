@@ -494,7 +494,7 @@ function App({ onLogout }) {
         {tab === "comisiones" && <Comisiones ventas={ventas} vendedoras={vendedoras} pagos={pagos} addPago={addPago} marcarVentasPagadas={marcarVentasPagadas} currentMes={currentMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "historial" && <Historial ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "comparar" && <Comparar ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
-        {tab === "config" && <Config vendedoras={vendedoras} setVendedoras={setVendedoras} clientes={clientes} setClientes={setClientes} ventas={ventas} setVentas={setVentas} setPagos={setPagos} pagos={pagos} />}
+        {tab === "config" && <Config vendedoras={vendedoras} setVendedoras={setVendedoras} clientes={clientes} setClientes={setClientes} ventas={ventas} setVentas={setVentas} setPagos={setPagos} pagos={pagos} catalogo={catalogo} aliases={aliases} />}
       </div>
     </div>
   );
@@ -1690,7 +1690,7 @@ function Comparar({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
 }
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
-function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setVentas, setPagos }) {
+function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setVentas, setPagos, catalogo, aliases }) {
   const [nueva, setNueva] = useState({ nombre: "", comision: "", color: "#8B5CF6" });
   const [editId, setEditId] = useState(null);
   const [editComision, setEditComision] = useState("");
@@ -1861,54 +1861,68 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
               </div>
               <p style={{ fontSize: 10, color: "#7A5848", marginTop: 6 }}>Primeros 25</p>
 
-              {/* Banco de pruebas del matching */}
-              <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #E8C4B0" }}>
-                <p style={{ fontSize: 12, fontWeight: 700, color: "#5A3828", marginBottom: 8 }}>
-                  Probar el matching
-                </p>
-                <p style={{ fontSize: 11, color: "#6B4A3E", marginBottom: 8 }}>
-                  Escribí lo que pondría una chica en el remito y fijate qué encuentra.
-                </p>
-                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                  <input className="input" value={pruebaCod} onChange={e => setPruebaCod(e.target.value)}
-                    placeholder="Código (opcional)" style={{ width: 130 }} />
-                  <input className="input" value={pruebaDesc} onChange={e => setPruebaDesc(e.target.value)}
-                    placeholder="Descripción escrita a mano" style={{ flex: 1 }} />
-                </div>
-
-                {(pruebaCod || pruebaDesc) && (() => {
-                  const m = matchearArticulo(pruebaCod, pruebaDesc, catFull.rows, {});
-                  const colores = { ok: "#10B981", alias: "#10B981", solo_codigo: "#10B981",
-                                    similar: "#A85D43", revisar: "#F59E0B", sin_match: "#B3261E" };
-                  const textos = { ok: "✓ Match seguro", alias: "✓ Por alias aprendido",
-                                   solo_codigo: "✓ Por código (sin descripción)",
-                                   similar: "≈ Similar a", revisar: "⚠ Chequear este art",
-                                   sin_match: "✕ Sin match" };
-                  return (
-                    <div style={{ background: "#FFFFFF", borderRadius: 8, padding: 10 }}>
-                      <p style={{ fontSize: 12, fontWeight: 700, color: colores[m.estado], marginBottom: 6 }}>
-                        {textos[m.estado]} {m.score ? `(${Math.round(m.score * 100)}%)` : ""}
-                      </p>
-                      {m.codigo && (
-                        <p style={{ fontSize: 12, color: "#2C1A14", marginBottom: 6 }}>
-                          <b>{m.codigo}</b> — {m.descripcion}
-                          {m.costo_total !== null
-                            ? <span style={{ color: "#10B981" }}> · costo ${m.costo_total}</span>
-                            : <span style={{ color: "#B3261E" }}> · ⚠ sin costo cargado</span>}
-                        </p>
-                      )}
-                      <p style={{ fontSize: 10, color: "#7A5848", marginBottom: 3 }}>Más parecidos:</p>
-                      {m.candidatos.map((cd, i) => (
-                        <p key={i} style={{ fontSize: 11, color: "#5A3828", margin: 0 }}>
-                          {Math.round(cd.score * 100)}% · <b>{cd.codigo}</b> — {cd.descripcion}
-                        </p>
-                      ))}
-                    </div>
-                  );
-                })()}
-              </div>
             </div>
           )}
+
+          {/* Banco de pruebas del matching — siempre visible */}
+          <div style={{ marginBottom: 18, paddingBottom: 14, borderBottom: "1px solid #E8C4B0" }}>
+            <p style={{ fontSize: 12, fontWeight: 700, color: "#5A3828", marginBottom: 4 }}>Probar el matching</p>
+            {(() => {
+              const cat = (catFull && catFull.ok && catFull.rows.length) ? catFull.rows : (catalogo || []);
+              const origen = (catFull && catFull.ok && catFull.rows.length) ? "recién armado" : "cargado al iniciar la app";
+              if (!cat.length) {
+                return (
+                  <p style={{ fontSize: 11, color: "#B3261E", marginTop: 4 }}>
+                    ⚠ El catálogo NO está cargado. Apretá "Armar catálogo completo" arriba. Si así funciona,
+                    el problema es que la app no lo carga sola al arrancar.
+                  </p>
+                );
+              }
+              return (
+                <div>
+                  <p style={{ fontSize: 11, color: "#10B981", marginBottom: 8 }}>
+                    ✓ {cat.length} artículos disponibles ({origen})
+                  </p>
+                  <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                    <input className="input" value={pruebaCod} onChange={e => setPruebaCod(e.target.value)}
+                      placeholder="Código (opcional)" style={{ width: 130 }} />
+                    <input className="input" value={pruebaDesc} onChange={e => setPruebaDesc(e.target.value)}
+                      placeholder="Ej: poncho c/ cord." style={{ flex: 1 }} />
+                  </div>
+                  {(pruebaCod || pruebaDesc) && (() => {
+                    const m = matchearArticulo(pruebaCod, pruebaDesc, cat, aliases || {});
+                    const colores = { ok: "#10B981", alias: "#10B981", solo_codigo: "#10B981",
+                                      similar: "#A85D43", revisar: "#F59E0B", sin_match: "#B3261E" };
+                    const textos = { ok: "✓ Match seguro", alias: "✓ Por alias aprendido",
+                                     solo_codigo: "✓ Por código (sin descripción)",
+                                     similar: "≈ Similar a", revisar: "⚠ Chequear este art",
+                                     sin_match: "✕ Sin match" };
+                    return (
+                      <div style={{ background: "#FFFFFF", borderRadius: 8, padding: 10 }}>
+                        <p style={{ fontSize: 12, fontWeight: 700, color: colores[m.estado], marginBottom: 6 }}>
+                          {textos[m.estado]} {m.score ? `(${Math.round(m.score * 100)}%)` : ""}
+                        </p>
+                        {m.codigo && (
+                          <p style={{ fontSize: 12, color: "#2C1A14", marginBottom: 6 }}>
+                            <b>{m.codigo}</b> — {m.descripcion}
+                            {m.costo_total !== null
+                              ? <span style={{ color: "#10B981" }}> · costo ${m.costo_total}</span>
+                              : <span style={{ color: "#B3261E" }}> · ⚠ sin costo cargado</span>}
+                          </p>
+                        )}
+                        <p style={{ fontSize: 10, color: "#7A5848", marginBottom: 3 }}>Más parecidos:</p>
+                        {m.candidatos.map((cd, i) => (
+                          <p key={i} style={{ fontSize: 11, color: "#5A3828", margin: 0 }}>
+                            {Math.round(cd.score * 100)}% · <b>{cd.codigo}</b> — {cd.descripcion}
+                          </p>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+              );
+            })()}
+          </div>
 
           <p style={{ fontSize: 12, color: "#5A3828", marginBottom: 10 }}>
             Explorar tablas del proyecto de Costos:
