@@ -76,6 +76,81 @@ async function espiarTablaCostos(nombre, schema = "costos") {
   return { ok: true, error: null, rows: data || [] };
 }
 
+// ── MOTOR DE MATCHING DE ARTICULOS ──
+const STOP_DESC = new Set(["de","con","sin","y","o","el","la","los","las","un","una","para","en","a","del","al","por"]);
+
+function normTexto(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokensDesc(s) {
+  return normTexto(s).split(" ").filter(t => t.length > 1 && !STOP_DESC.has(t));
+}
+
+// Coeficiente de Dice sobre palabras, con tolerancia a plurales/typos por prefijo
+function similitudDesc(a, b) {
+  const ta = tokensDesc(a), tb = tokensDesc(b);
+  if (!ta.length || !tb.length) return 0;
+  const usados = new Array(tb.length).fill(false);
+  let comunes = 0;
+  ta.forEach(t => {
+    let idx = tb.findIndex((u, i) => !usados[i] && u === t);
+    if (idx === -1) {
+      idx = tb.findIndex((u, i) => {
+        if (usados[i]) return false;
+        const n = Math.min(4, Math.min(t.length, u.length));
+        return n >= 3 && t.slice(0, n) === u.slice(0, n);
+      });
+      if (idx !== -1) { usados[idx] = true; comunes += 0.75; return; }
+    } else { usados[idx] = true; comunes += 1; }
+  });
+  return (2 * comunes) / (ta.length + tb.length);
+}
+
+const normCodigo = c => String(c || "").trim().toUpperCase().replace(/\s+/g, "");
+
+// Devuelve el mejor match + estado + candidatos alternativos
+function matchearArticulo(codigoLeido, descLeida, catalogo, aliases = {}) {
+  const base = { codigo: null, descripcion: null, costo_total: null, estado: "sin_match", score: 0, candidatos: [] };
+  if (!catalogo || !catalogo.length) return base;
+
+  const ranking = catalogo
+    .map(a => ({ a, s: similitudDesc(descLeida, a.descripcion) }))
+    .sort((x, y) => y.s - x.s);
+  const top3 = ranking.slice(0, 3).map(r => ({ ...r.a, score: Math.round(r.s * 100) / 100 }));
+  const mejor = ranking[0] ? ranking[0].a : null;
+  const mejorScore = ranking[0] ? ranking[0].s : 0;
+
+  // 1) Alias aprendido de una correccion previa
+  const clave = normTexto(descLeida);
+  if (clave && aliases[clave]) {
+    const art = catalogo.find(a => normCodigo(a.codigo) === normCodigo(aliases[clave]));
+    if (art) return { ...base, ...art, estado: "alias", score: 1, candidatos: top3 };
+  }
+
+  // 2) Codigo exacto
+  const porCodigo = codigoLeido
+    ? catalogo.find(a => normCodigo(a.codigo) === normCodigo(codigoLeido)) || null
+    : null;
+
+  if (porCodigo) {
+    const hayDesc = tokensDesc(descLeida).length > 0;
+    if (!hayDesc) return { ...base, ...porCodigo, estado: "solo_codigo", score: 1, candidatos: top3 };
+    const sCod = similitudDesc(descLeida, porCodigo.descripcion);
+    if (sCod >= 0.45) return { ...base, ...porCodigo, estado: "ok", score: sCod, candidatos: top3 };
+    return { ...base, ...porCodigo, estado: "revisar", score: sCod, candidatos: top3 };
+  }
+
+  // 3) Solo descripcion
+  if (mejorScore >= 0.7) return { ...base, ...mejor, estado: "similar", score: mejorScore, candidatos: top3 };
+  return { ...base, estado: "sin_match", score: mejorScore, candidatos: top3 };
+}
+
 // Catalogo completo: articulos (codigo + descripcion) cruzado con costo_articulo (costo_total)
 async function armarCatalogoCompleto() {
   const { data: arts, error: e1 } = await sbCostos.from("articulos").select("*").limit(5000);
@@ -1544,6 +1619,8 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
 
   const [catFull, setCatFull] = useState(null);
   const [armandoCat, setArmandoCat] = useState(false);
+  const [pruebaCod, setPruebaCod] = useState("");
+  const [pruebaDesc, setPruebaDesc] = useState("");
   const armarCat = async () => {
     setArmandoCat(true); setCatFull(null);
     const r = await armarCatalogoCompleto();
@@ -1666,6 +1743,53 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
                 ))}
               </div>
               <p style={{ fontSize: 10, color: "#7A5848", marginTop: 6 }}>Primeros 25</p>
+
+              {/* Banco de pruebas del matching */}
+              <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #E8C4B0" }}>
+                <p style={{ fontSize: 12, fontWeight: 700, color: "#5A3828", marginBottom: 8 }}>
+                  Probar el matching
+                </p>
+                <p style={{ fontSize: 11, color: "#6B4A3E", marginBottom: 8 }}>
+                  Escribí lo que pondría una chica en el remito y fijate qué encuentra.
+                </p>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                  <input className="input" value={pruebaCod} onChange={e => setPruebaCod(e.target.value)}
+                    placeholder="Código (opcional)" style={{ width: 130 }} />
+                  <input className="input" value={pruebaDesc} onChange={e => setPruebaDesc(e.target.value)}
+                    placeholder="Descripción escrita a mano" style={{ flex: 1 }} />
+                </div>
+
+                {(pruebaCod || pruebaDesc) && (() => {
+                  const m = matchearArticulo(pruebaCod, pruebaDesc, catFull.rows, {});
+                  const colores = { ok: "#10B981", alias: "#10B981", solo_codigo: "#10B981",
+                                    similar: "#A85D43", revisar: "#F59E0B", sin_match: "#B3261E" };
+                  const textos = { ok: "✓ Match seguro", alias: "✓ Por alias aprendido",
+                                   solo_codigo: "✓ Por código (sin descripción)",
+                                   similar: "≈ Similar a", revisar: "⚠ Chequear este art",
+                                   sin_match: "✕ Sin match" };
+                  return (
+                    <div style={{ background: "#FFFFFF", borderRadius: 8, padding: 10 }}>
+                      <p style={{ fontSize: 12, fontWeight: 700, color: colores[m.estado], marginBottom: 6 }}>
+                        {textos[m.estado]} {m.score ? `(${Math.round(m.score * 100)}%)` : ""}
+                      </p>
+                      {m.codigo && (
+                        <p style={{ fontSize: 12, color: "#2C1A14", marginBottom: 6 }}>
+                          <b>{m.codigo}</b> — {m.descripcion}
+                          {m.costo_total !== null
+                            ? <span style={{ color: "#10B981" }}> · costo ${m.costo_total}</span>
+                            : <span style={{ color: "#B3261E" }}> · ⚠ sin costo cargado</span>}
+                        </p>
+                      )}
+                      <p style={{ fontSize: 10, color: "#7A5848", marginBottom: 3 }}>Más parecidos:</p>
+                      {m.candidatos.map((cd, i) => (
+                        <p key={i} style={{ fontSize: 11, color: "#5A3828", margin: 0 }}>
+                          {Math.round(cd.score * 100)}% · <b>{cd.codigo}</b> — {cd.descripcion}
+                        </p>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
             </div>
           )}
 
