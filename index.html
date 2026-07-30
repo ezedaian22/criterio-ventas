@@ -126,14 +126,14 @@ function matchearArticulo(codigoLeido, descLeida, catalogo, aliases = {}) {
   const mejor = ranking[0] ? ranking[0].a : null;
   const mejorScore = ranking[0] ? ranking[0].s : 0;
 
-  // 1) Alias aprendido de una correccion previa
+  // 1. Alias aprendido de una correccion previa
   const clave = normTexto(descLeida);
   if (clave && aliases[clave]) {
     const art = catalogo.find(a => normCodigo(a.codigo) === normCodigo(aliases[clave]));
     if (art) return { ...base, ...art, estado: "alias", score: 1, candidatos: top3 };
   }
 
-  // 2) Codigo exacto
+  // 2. Codigo exacto
   const porCodigo = codigoLeido
     ? catalogo.find(a => normCodigo(a.codigo) === normCodigo(codigoLeido)) || null
     : null;
@@ -146,7 +146,7 @@ function matchearArticulo(codigoLeido, descLeida, catalogo, aliases = {}) {
     return { ...base, ...porCodigo, estado: "revisar", score: sCod, candidatos: top3 };
   }
 
-  // 3) Solo descripcion
+  // 3. Solo descripcion
   if (mejorScore >= 0.7) return { ...base, ...mejor, estado: "similar", score: mejorScore, candidatos: top3 };
   return { ...base, estado: "sin_match", score: mejorScore, candidatos: top3 };
 }
