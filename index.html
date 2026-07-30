@@ -1142,13 +1142,13 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
           <div onClick={e => e.stopPropagation()}
             style={{ display: "flex", gap: 8, padding: 10, flexWrap: "wrap", justifyContent: "center",
                      position: "sticky", top: 0, background: "rgba(0,0,0,0.7)", width: "100%" }}>
-            <button onClick={() => setZoom(z => Math.max(0.5, z - 0.5))}
+            <button onClick={() => setZoom(z => Math.max(0.5, z - 0.25))}
               style={{ background: "#FFF8F5", border: "none", borderRadius: 6, padding: "8px 14px",
                        fontSize: 16, cursor: "pointer", fontFamily: "inherit", fontWeight: 700 }}>−</button>
             <span style={{ color: "#fff", fontSize: 13, alignSelf: "center", minWidth: 54, textAlign: "center" }}>
               {Math.round(zoom * 100)}%
             </span>
-            <button onClick={() => setZoom(z => Math.min(6, z + 0.5))}
+            <button onClick={() => setZoom(z => Math.min(3, z + 0.25))}
               style={{ background: "#FFF8F5", border: "none", borderRadius: 6, padding: "8px 14px",
                        fontSize: 16, cursor: "pointer", fontFamily: "inherit", fontWeight: 700 }}>+</button>
             <button onClick={() => setZoom(1)}
@@ -1161,7 +1161,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
           <div onClick={e => e.stopPropagation()}
             style={{ flex: 1, width: "100%", overflow: "auto", display: "flex",
                      alignItems: "flex-start", justifyContent: "center", padding: 10 }}>
-            <img src={fotoAmpliada} alt="" onClick={() => setZoom(z => z >= 3 ? 1 : z + 1)}
+            <img src={fotoAmpliada} alt="" onClick={() => setZoom(z => z >= 2 ? 1 : z + 0.5)}
               style={{ width: `${zoom * 100}%`, maxWidth: zoom === 1 ? "100%" : "none",
                        height: "auto", cursor: "zoom-in", borderRadius: 4 }} />
           </div>
