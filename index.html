@@ -316,6 +316,8 @@ function App({ onLogout }) {
   const [vendedoras, setVendedoras] = useState(INITIAL_VENDEDORAS);
   const [clientes, setClientes] = useState({});
   const [pagos, setPagos] = useState([]);
+  const [catalogo, setCatalogo] = useState([]);
+  const [aliases, setAliases] = useState({});
 
   // Load all data from Supabase on mount
   useEffect(() => {
@@ -333,6 +335,18 @@ function App({ onLogout }) {
           }
         }
       } catch(e) { console.log("Keys no cargadas desde Supabase"); }
+
+      // Catalogo de Costos + alias aprendidos (para el matching de articulos)
+      try {
+        const cat = await armarCatalogoCompleto();
+        if (cat.ok) setCatalogo(cat.rows);
+        const { data: al } = await sb.from("articulo_alias").select("*");
+        if (al) {
+          const mapa = {};
+          al.forEach(r => { if (r.texto) mapa[r.texto] = r.articulo_codigo; });
+          setAliases(mapa);
+        }
+      } catch (e) { console.log("catalogo/alias no cargados", e); }
 
       setLoading(true);
       try {
@@ -463,7 +477,7 @@ function App({ onLogout }) {
 
       <div style={{ maxWidth: 900, margin: "0 auto", padding: "24px 24px" }} className="fade-in">
         {tab === "dashboard" && <Dashboard ventas={ventas} vendedoras={vendedoras} pagos={pagos} currentMes={currentMes} getComisionMes={getComisionMes} getPagadoMes={getPagadoMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
-        {tab === "nueva" && <NuevaVenta vendedoras={vendedoras} clientes={clientes} addVenta={addVenta} fmtPeso={fmtPeso} />}
+        {tab === "nueva" && <NuevaVenta vendedoras={vendedoras} clientes={clientes} addVenta={addVenta} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} />}
         {tab === "comisiones" && <Comisiones ventas={ventas} vendedoras={vendedoras} pagos={pagos} addPago={addPago} marcarVentasPagadas={marcarVentasPagadas} currentMes={currentMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "historial" && <Historial ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "comparar" && <Comparar ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
@@ -556,11 +570,13 @@ const PROMPT_EXTRACCION = `Analizá este presupuesto/comprobante de venta de rop
   "cliente": "nombre del cliente o null",
   "total": número total de la venta como número (sin descuento aplicado si hay uno separado) o null,
   "totalConDescuento": número total final después del descuento o null,
-  "items": [{"descripcion": "...", "cantidad": N, "precio": N, "total": N}],
+  "items": [{"codigo": "codigo de articulo si figura, o null", "descripcion": "...", "cantidad": N, "precio": N, "total": N}],
   "descuento": número de descuento aplicado o null,
   "notas": "cualquier nota relevante o null"
 }
-No leas la fecha del comprobante. Si no podés leer algún campo, poné null.`;
+No leas la fecha del comprobante.
+El codigo de articulo suele ser un numero corto (1 a 4 digitos) al lado de la descripcion. Si no lo ves, poné null; NO lo inventes ni lo deduzcas de la descripcion.
+Si no podés leer algún campo, poné null.`;
 
 const BACKUP_API_KEY = "AIzaSyDaAuhseWd2ktPgwi0w1AzKjHRoQyIIHg8";
 let lastKeyUsed = 0; // 0 = primary, 1 = backup
@@ -618,28 +634,116 @@ async function extraerDatosFotoBase64(base64, mediaType) {
   throw lastError || new Error("No se pudo procesar la imagen");
 }
 
-function ItemsDetectados({ extracted, fmtPeso }) {
+function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases }) {
   const [expanded, setExpanded] = React.useState(false);
   const items = extracted.items || [];
-  const visible = expanded ? items : items.slice(0, 3);
+
+  const hayCat = catalogo && catalogo.length > 0;
+  const conMatch = items.map(it => ({
+    it,
+    m: hayCat ? matchearArticulo(it.codigo, it.descripcion, catalogo, aliases || {}) : null
+  }));
+  const visible = expanded ? conMatch : conMatch.slice(0, 3);
+
+  const ESTILO = {
+    ok:          { color: "#10B981", txt: "✓" },
+    alias:       { color: "#10B981", txt: "✓ alias" },
+    solo_codigo: { color: "#10B981", txt: "✓ por código" },
+    similar:     { color: "#A85D43", txt: "≈ similar a" },
+    revisar:     { color: "#F59E0B", txt: "⚠ chequear este art" },
+    sin_match:   { color: "#B3261E", txt: "✕ sin match" },
+  };
+
+  // Los items suman ANTES del descuento, asi que se comparan contra el bruto
+  const sumaItems = items.reduce((s, it) => s + Number(it.total || 0), 0);
+  const totalBruto = Number(extracted.total ?? 0);
+  const totalRemito = Number(extracted.totalConDescuento ?? extracted.total ?? 0);
+  const baseCmp = totalBruto > 0 ? totalBruto : totalRemito;
+  const descuadre = items.length > 0 && baseCmp > 0 && Math.abs(sumaItems - baseCmp) > Math.max(1, baseCmp * 0.02);
+  // Descuento real deducido de los numeros (mas confiable que lo que lee la IA)
+  const descReal = sumaItems > 0 && totalRemito > 0 && totalRemito < sumaItems
+    ? Math.round((1 - totalRemito / sumaItems) * 1000) / 10
+    : null;
+
+  // Costo total del remito (solo lo que matcheo y tiene costo)
+  const costoTotal = conMatch.reduce((s, x) => {
+    if (!x.m || x.m.costo_total === null) return s;
+    return s + Number(x.m.costo_total) * Number(x.it.cantidad || 1);
+  }, 0);
+  const sinCosto = conMatch.filter(x => x.m && x.m.codigo && x.m.costo_total === null).length;
+  const sinMatch = conMatch.filter(x => x.m && !x.m.codigo).length;
+  const margen = totalRemito - costoTotal;
+
   return (
     <div style={{ background: "#FFFFFF", borderRadius: 8, padding: 10 }}>
       <p style={{ fontSize: 10, color: "#A85D43", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>✓ Detectado</p>
-      {visible.map((it, i) => (
-        <p key={i} style={{ fontSize: 11, color: "#AAA", marginBottom: 2 }}>{it.cantidad}x {it.descripcion} — {fmtPeso(it.total)}</p>
-      ))}
-      {items.length > 3 && (
+
+      {visible.map((x, i) => {
+        const est = x.m ? ESTILO[x.m.estado] : null;
+        return (
+          <div key={i} style={{ marginBottom: 6, paddingBottom: 6, borderBottom: "1px solid #F4E6DE" }}>
+            <p style={{ fontSize: 11, color: "#5A3828", margin: 0 }}>
+              {x.it.cantidad}x {x.it.codigo ? <b>[{x.it.codigo}] </b> : ""}{x.it.descripcion} — {fmtPeso(x.it.total)}
+            </p>
+            {x.m && (
+              <p style={{ fontSize: 10, color: est.color, margin: "2px 0 0 0", fontWeight: 600 }}>
+                {est.txt}
+                {x.m.codigo ? ` ${x.m.codigo} — ${x.m.descripcion}` : ""}
+                {x.m.codigo && x.m.costo_total !== null ? ` · costo ${fmtPeso(x.m.costo_total)}` : ""}
+                {x.m.codigo && x.m.costo_total === null ? " · ⚠ sin costo cargado" : ""}
+              </p>
+            )}
+            {x.m && (x.m.estado === "revisar" || x.m.estado === "sin_match" || x.m.estado === "similar") && x.m.candidatos.length > 0 && (
+              <p style={{ fontSize: 10, color: "#7A5848", margin: "2px 0 0 0" }}>
+                Opciones: {x.m.candidatos.map(cd => `${cd.codigo} (${Math.round(cd.score * 100)}%)`).join(" · ")}
+              </p>
+            )}
+          </div>
+        );
+      })}
+
+      {conMatch.length > 3 && (
         <button onClick={() => setExpanded(e => !e)} style={{ background: "none", border: "none", color: "#A85D43", cursor: "pointer", fontSize: 11, padding: "4px 0", textDecoration: "underline" }}>
-          {expanded ? "Ver menos ▲" : `+${items.length - 3} más... Ver todos ▼`}
+          {expanded ? "Ver menos ▲" : `+${conMatch.length - 3} más... Ver todos ▼`}
         </button>
       )}
+
       {extracted.descuento && <p style={{ fontSize: 11, color: "#F87171", marginTop: 4 }}>Descuento: -{fmtPeso(extracted.descuento)}</p>}
-      <p style={{ fontSize: 13, fontWeight: 700, color: "#A85D43", marginTop: 4 }}>Total: {fmtPeso(extracted.totalConDescuento ?? extracted.total)}</p>
+      <p style={{ fontSize: 13, fontWeight: 700, color: "#A85D43", marginTop: 4 }}>Total: {fmtPeso(totalRemito)}</p>
+
+      {descReal !== null && descReal > 0.5 && (
+        <p style={{ fontSize: 11, color: "#7A5848", marginTop: 2 }}>
+          Items suman {fmtPeso(sumaItems)} → descuento aplicado ≈ {descReal}%
+        </p>
+      )}
+
+      {descuadre && (
+        <p style={{ fontSize: 11, color: "#B3261E", fontWeight: 600, marginTop: 4 }}>
+          ⚠ Los items suman {fmtPeso(sumaItems)} y el subtotal dice {fmtPeso(baseCmp)} — falta o sobra alguna línea
+        </p>
+      )}
+
+      {hayCat && items.length > 0 && (
+        <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #E8C4B0" }}>
+          <p style={{ fontSize: 11, color: "#5A3828", margin: 0 }}>
+            Costo: {fmtPeso(costoTotal)} · Margen estimado: <b style={{ color: margen > 0 ? "#10B981" : "#B3261E" }}>{fmtPeso(margen)}</b>
+          </p>
+          {(sinCosto > 0 || sinMatch > 0) && (
+            <p style={{ fontSize: 10, color: "#B3261E", margin: "2px 0 0 0" }}>
+              ⚠ Margen incompleto: {sinMatch > 0 ? `${sinMatch} sin identificar` : ""}{sinMatch > 0 && sinCosto > 0 ? " · " : ""}{sinCosto > 0 ? `${sinCosto} sin costo cargado` : ""}
+            </p>
+          )}
+        </div>
+      )}
+
+      {!hayCat && (
+        <p style={{ fontSize: 10, color: "#7A5848", marginTop: 6 }}>Catálogo no cargado — sin matching de artículos</p>
+      )}
     </div>
   );
 }
 
-function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso }) {
+function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases }) {
   const fileRef = useRef();
   const fileRefMulti = useRef();
 
@@ -881,7 +985,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso }) {
                     </div>
                   )}
                   {activeItem.extracted && (
-                    <ItemsDetectados extracted={activeItem.extracted} fmtPeso={fmtPeso} />
+                    <ItemsDetectados extracted={activeItem.extracted} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} />
                   )}
                 </div>
               </div>
