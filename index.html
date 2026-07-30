@@ -79,10 +79,23 @@ async function espiarTablaCostos(nombre, schema = "costos") {
 // ── MOTOR DE MATCHING DE ARTICULOS ──
 const STOP_DESC = new Set(["de","con","sin","y","o","el","la","los","las","un","una","para","en","a","del","al","por"]);
 
+// Solo notacion con barra, que es estandar. NO se expanden abreviaturas de palabras:
+// truncar palabras lo resuelve el match por prefijo en similitudDesc, sin tener que
+// adivinar que significa cada abreviatura del rubro (ej: "cord" = corderito, no cordon).
+const ABREVS = [
+  [/\bc\s*\/\s*/g, "con "],
+  [/\bs\s*\/\s*/g, "sin "],
+  [/\bm\s*\/\s*l\b/g, "manga larga"],
+  [/\bm\s*\/\s*c\b/g, "manga corta"],
+];
+
 function normTexto(s) {
-  return String(s || "")
+  let t = String(s || "")
     .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  // las abreviaturas se expanden ANTES de sacar la puntuacion (c/ y s/ dependen de la barra)
+  ABREVS.forEach(([re, rep]) => { t = t.replace(re, rep); });
+  return t
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -147,7 +160,7 @@ function matchearArticulo(codigoLeido, descLeida, catalogo, aliases = {}) {
   }
 
   // 3. Solo descripcion
-  if (mejorScore >= 0.7) return { ...base, ...mejor, estado: "similar", score: mejorScore, candidatos: top3 };
+  if (mejorScore >= 0.45) return { ...base, ...mejor, estado: "similar", score: mejorScore, candidatos: top3 };
   return { ...base, estado: "sin_match", score: mejorScore, candidatos: top3 };
 }
 
