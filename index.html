@@ -1134,36 +1134,36 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
 
-      {/* Visor de foto ampliada */}
+      {/* Visor de foto — panel lateral, no tapa la pantalla */}
       {fotoAmpliada && (
-        <div onClick={() => setFotoAmpliada(null)}
-          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 9999,
-                   display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start" }}>
-          <div onClick={e => e.stopPropagation()}
-            style={{ display: "flex", gap: 8, padding: 10, flexWrap: "wrap", justifyContent: "center",
-                     position: "sticky", top: 0, background: "rgba(0,0,0,0.7)", width: "100%" }}>
-            <button onClick={() => setZoom(z => Math.max(0.5, z - 0.25))}
-              style={{ background: "#FFF8F5", border: "none", borderRadius: 6, padding: "8px 14px",
-                       fontSize: 16, cursor: "pointer", fontFamily: "inherit", fontWeight: 700 }}>−</button>
-            <span style={{ color: "#fff", fontSize: 13, alignSelf: "center", minWidth: 54, textAlign: "center" }}>
+        <div style={{ position: "fixed", top: 0, right: 0, bottom: 0,
+                      width: "min(38vw, 400px)", minWidth: 220,
+                      background: "rgba(20,10,6,0.96)", zIndex: 9999,
+                      display: "flex", flexDirection: "column",
+                      boxShadow: "-4px 0 20px rgba(0,0,0,0.4)" }}>
+          <div style={{ display: "flex", gap: 5, padding: 8, alignItems: "center",
+                        borderBottom: "1px solid rgba(255,255,255,0.15)", flexWrap: "wrap" }}>
+            <button onClick={() => setZoom(z => Math.max(0.4, z - 0.2))}
+              style={{ background: "#FFF8F5", border: "none", borderRadius: 5, padding: "5px 10px",
+                       fontSize: 14, cursor: "pointer", fontFamily: "inherit", fontWeight: 700 }}>−</button>
+            <span style={{ color: "#fff", fontSize: 11, minWidth: 40, textAlign: "center" }}>
               {Math.round(zoom * 100)}%
             </span>
-            <button onClick={() => setZoom(z => Math.min(3, z + 0.25))}
-              style={{ background: "#FFF8F5", border: "none", borderRadius: 6, padding: "8px 14px",
-                       fontSize: 16, cursor: "pointer", fontFamily: "inherit", fontWeight: 700 }}>+</button>
+            <button onClick={() => setZoom(z => Math.min(4, z + 0.2))}
+              style={{ background: "#FFF8F5", border: "none", borderRadius: 5, padding: "5px 10px",
+                       fontSize: 14, cursor: "pointer", fontFamily: "inherit", fontWeight: 700 }}>+</button>
             <button onClick={() => setZoom(1)}
-              style={{ background: "#FFF8F5", border: "none", borderRadius: 6, padding: "8px 12px",
-                       fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Ajustar</button>
+              style={{ background: "#FFF8F5", border: "none", borderRadius: 5, padding: "5px 8px",
+                       fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>Ajustar</button>
             <button onClick={() => setFotoAmpliada(null)}
-              style={{ background: "#A85D43", color: "#fff", border: "none", borderRadius: 6, padding: "8px 14px",
-                       fontSize: 12, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>✕ Cerrar</button>
+              style={{ background: "#A85D43", color: "#fff", border: "none", borderRadius: 5,
+                       padding: "5px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit",
+                       fontWeight: 600, marginLeft: "auto" }}>✕</button>
           </div>
-          <div onClick={e => e.stopPropagation()}
-            style={{ flex: 1, width: "100%", overflow: "auto", display: "flex",
-                     alignItems: "flex-start", justifyContent: "center", padding: 10 }}>
-            <img src={fotoAmpliada} alt="" onClick={() => setZoom(z => z >= 2 ? 1 : z + 0.5)}
-              style={{ width: `${zoom * 100}%`, maxWidth: zoom === 1 ? "100%" : "none",
-                       height: "auto", cursor: "zoom-in", borderRadius: 4 }} />
+          <div style={{ flex: 1, overflow: "auto", padding: 6 }}>
+            <img src={fotoAmpliada} alt="" onClick={() => setZoom(z => z >= 2 ? 1 : z + 0.4)}
+              style={{ width: `${zoom * 100}%`, height: "auto", cursor: "zoom-in",
+                       borderRadius: 4, display: "block" }} />
           </div>
         </div>
       )}
