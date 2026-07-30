@@ -127,6 +127,34 @@ function similitudDesc(a, b) {
 
 const normCodigo = c => String(c || "").trim().toUpperCase().replace(/\s+/g, "");
 
+// Palabras que indican que un renglon del remito son VARIOS articulos del catalogo
+const PALABRAS_CONJUNTO = ["conjunto", "juego", "set", "combo"];
+const esConjunto = desc => {
+  const t = tokensDesc(desc);
+  return t.some(w => PALABRAS_CONJUNTO.includes(w));
+};
+
+// Para un conjunto, los candidatos salen de las palabras distintivas
+// (sacando la que indica conjunto): "conjunto darlon" -> todos los darlon
+function candidatosConjunto(desc, catalogo, limite = 12) {
+  const distintivas = tokensDesc(desc).filter(w => !PALABRAS_CONJUNTO.includes(w));
+  if (!distintivas.length) return [];
+  return catalogo
+    .map(a => {
+      const ta = tokensDesc(a.descripcion);
+      let hits = 0;
+      distintivas.forEach(d => {
+        if (ta.some(u => u === d || (d.length >= 3 && u.length >= 3 &&
+            u.slice(0, 4) === d.slice(0, 4)))) hits++;
+      });
+      return { a, hits };
+    })
+    .filter(x => x.hits > 0)
+    .sort((x, y) => y.hits - x.hits || String(x.a.codigo).localeCompare(String(y.a.codigo)))
+    .slice(0, limite)
+    .map(x => x.a);
+}
+
 // Devuelve el mejor match + estado + candidatos alternativos
 function matchearArticulo(codigoLeido, descLeida, catalogo, aliases = {}) {
   const base = { codigo: null, descripcion: null, costo_total: null, estado: "sin_match", score: 0, candidatos: [] };
@@ -139,11 +167,34 @@ function matchearArticulo(codigoLeido, descLeida, catalogo, aliases = {}) {
   const mejor = ranking[0] ? ranking[0].a : null;
   const mejorScore = ranking[0] ? ranking[0].s : 0;
 
-  // 1. Alias aprendido de una correccion previa
+  // 1. Alias aprendido de una correccion previa (puede tener varios codigos separados por coma)
   const clave = normTexto(descLeida);
   if (clave && aliases[clave]) {
-    const art = catalogo.find(a => normCodigo(a.codigo) === normCodigo(aliases[clave]));
-    if (art) return { ...base, ...art, estado: "alias", score: 1, candidatos: top3 };
+    const codigos = String(aliases[clave]).split(",").map(s => s.trim()).filter(Boolean);
+    const arts = codigos
+      .map(cod => catalogo.find(a => normCodigo(a.codigo) === normCodigo(cod)))
+      .filter(Boolean);
+    if (arts.length === 1) {
+      return { ...base, ...arts[0], estado: "alias", score: 1, candidatos: top3 };
+    }
+    if (arts.length > 1) {
+      const costoSuma = arts.every(a => a.costo_total !== null)
+        ? arts.reduce((s, a) => s + Number(a.costo_total), 0)
+        : null;
+      return {
+        ...base,
+        codigo: arts.map(a => a.codigo).join(" + "),
+        descripcion: arts.map(a => a.descripcion).join(" + "),
+        costo_total: costoSuma,
+        componentes: arts,
+        estado: "alias", score: 1, candidatos: top3,
+      };
+    }
+  }
+
+  // Renglon que es un conjunto: no se resuelve solo, hay que elegir los componentes
+  if (esConjunto(descLeida)) {
+    return { ...base, estado: "conjunto", score: 0, candidatos: top3 };
   }
 
   // 2. Codigo exacto
@@ -671,6 +722,42 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias }
   const [expanded, setExpanded] = React.useState(false);
   const [guardado, setGuardado] = React.useState({});
   const [errorAlias, setErrorAlias] = React.useState(null);
+  const [selConjunto, setSelConjunto] = React.useState({});
+  const [corrigiendo, setCorrigiendo] = React.useState(null);
+  const [busquedaArt, setBusquedaArt] = React.useState("");
+
+  // Busca en TODO el catalogo, por codigo o por descripcion
+  const buscarEnCatalogo = (txt) => {
+    const q = normTexto(txt);
+    if (!q) return [];
+    const qTokens = tokensDesc(txt);
+    return (catalogo || [])
+      .map(a => {
+        const codMatch = normCodigo(a.codigo).includes(normCodigo(txt)) ? 2 : 0;
+        const descMatch = similitudDesc(txt, a.descripcion);
+        const contiene = qTokens.length && qTokens.every(t => normTexto(a.descripcion).includes(t)) ? 1 : 0;
+        return { a, s: codMatch + contiene + descMatch };
+      })
+      .filter(x => x.s > 0.2)
+      .sort((x, y) => y.s - x.s)
+      .slice(0, 15)
+      .map(x => x.a);
+  };
+
+  const toggleComponente = (idx, codigo) => {
+    setSelConjunto(s => {
+      const actual = s[idx] || [];
+      return { ...s, [idx]: actual.includes(codigo) ? actual.filter(x => x !== codigo) : [...actual, codigo] };
+    });
+  };
+
+  const guardarConjunto = async (textoLeido, idx) => {
+    const codigos = selConjunto[idx] || [];
+    if (codigos.length < 2 || !guardarAlias) return;
+    const r = await guardarAlias(textoLeido, codigos.join(","));
+    if (r.ok) { setGuardado(g => ({ ...g, [idx]: codigos.join(" + ") })); setErrorAlias(null); }
+    else setErrorAlias(r.error);
+  };
 
   const elegir = async (textoLeido, codigo, idx) => {
     if (!guardarAlias) return;
@@ -698,6 +785,7 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias }
     similar:     { color: "#A85D43", txt: "≈ similar a" },
     revisar:     { color: "#F59E0B", txt: "⚠ chequear este art" },
     ambiguo:     { color: "#F59E0B", txt: "⚠ dos artículos posibles — elegir" },
+    conjunto:    { color: "#7C3AED", txt: "⊞ conjunto — elegí los artículos que lo componen" },
     sin_match:   { color: "#B3261E", txt: "✕ sin match" },
   };
 
@@ -740,6 +828,53 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias }
                 {x.m.codigo && x.m.costo_total === null ? " · ⚠ sin costo cargado" : ""}
               </p>
             )}
+            {x.m && x.m.estado === "conjunto" && (() => {
+              const opciones = candidatosConjunto(x.it.descripcion, catalogo);
+              const sel = selConjunto[i] || [];
+              const costoSel = opciones.filter(o => sel.includes(o.codigo))
+                .reduce((s, o) => s + Number(o.costo_total || 0), 0);
+              return (
+                <div style={{ margin: "4px 0 0 0" }}>
+                  {opciones.length === 0 && (
+                    <p style={{ fontSize: 10, color: "#B3261E", margin: 0 }}>
+                      No encontré artículos con esas palabras en el catálogo
+                    </p>
+                  )}
+                  {opciones.length > 0 && (
+                    <div>
+                      <p style={{ fontSize: 10, color: "#7A5848", margin: "0 0 3px 0" }}>
+                        Marcá los {sel.length >= 2 ? sel.length : "2 o más"} artículos que forman el conjunto:
+                      </p>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 160, overflowY: "auto" }}>
+                        {opciones.map((o, j) => {
+                          const marcado = sel.includes(o.codigo);
+                          return (
+                            <button key={j} onClick={() => toggleComponente(i, o.codigo)}
+                              style={{ background: marcado ? "#7C3AED" : "#FFF8F5",
+                                       color: marcado ? "#fff" : "#5A3828",
+                                       border: `1px solid ${marcado ? "#7C3AED" : "#D4A090"}`,
+                                       borderRadius: 6, padding: "4px 8px", fontSize: 10,
+                                       cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+                              {marcado ? "☑ " : "☐ "}<b>{o.codigo}</b> — {o.descripcion}
+                              {o.costo_total !== null ? ` · $${o.costo_total}` : " · sin costo"}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {sel.length >= 2 && (
+                        <button onClick={() => guardarConjunto(x.it.descripcion, i)}
+                          style={{ marginTop: 6, background: "#7C3AED", color: "#fff", border: "none",
+                                   borderRadius: 6, padding: "5px 10px", fontSize: 11, cursor: "pointer",
+                                   fontFamily: "inherit", fontWeight: 600 }}>
+                          Guardar conjunto de {sel.length} · costo {fmtPeso(costoSel)}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             {x.m && (x.m.estado === "revisar" || x.m.estado === "sin_match" || x.m.estado === "similar" || x.m.estado === "ambiguo") && x.m.candidatos.length > 0 && (
               <div style={{ margin: "4px 0 0 0" }}>
                 <p style={{ fontSize: 10, color: "#7A5848", margin: "0 0 3px 0" }}>
@@ -766,6 +901,43 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias }
               <p style={{ fontSize: 10, color: "#10B981", margin: "3px 0 0 0", fontWeight: 600 }}>
                 ✓ Guardado: de ahora en más "{x.it.descripcion}" va a matchear solo con {guardado[i]}
               </p>
+            )}
+
+            {/* Corrector universal: sirve tambien cuando el match salio verde pero esta mal */}
+            {x.m && x.m.estado !== "conjunto" && (
+              <button onClick={() => { setCorrigiendo(corrigiendo === i ? null : i); setBusquedaArt(""); }}
+                style={{ background: "none", border: "none", color: "#A85D43", cursor: "pointer",
+                         fontSize: 10, padding: "3px 0", textDecoration: "underline", fontFamily: "inherit" }}>
+                {corrigiendo === i ? "Cerrar" : (x.m.codigo ? "No es este / cambiar" : "Buscar en el catálogo")}
+              </button>
+            )}
+
+            {corrigiendo === i && (
+              <div style={{ marginTop: 4, background: "#FFF0E8", borderRadius: 6, padding: 8 }}>
+                <input className="input" value={busquedaArt} onChange={e => setBusquedaArt(e.target.value)}
+                  placeholder="Buscar por código o descripción..." autoFocus
+                  style={{ width: "100%", fontSize: 12, marginBottom: 6 }} />
+                {busquedaArt && (() => {
+                  const res = buscarEnCatalogo(busquedaArt);
+                  if (!res.length) return <p style={{ fontSize: 10, color: "#B3261E", margin: 0 }}>Nada encontrado</p>;
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 150, overflowY: "auto" }}>
+                      {res.map((o, j) => (
+                        <button key={j} onClick={() => { elegir(x.it.descripcion, o.codigo, i); setCorrigiendo(null); }}
+                          style={{ background: "#FFF8F5", color: "#5A3828", border: "1px solid #D4A090",
+                                   borderRadius: 6, padding: "4px 8px", fontSize: 10, cursor: "pointer",
+                                   fontFamily: "inherit", textAlign: "left" }}>
+                          <b>{o.codigo}</b> — {o.descripcion}
+                          {o.costo_total !== null ? ` · $${o.costo_total}` : " · sin costo"}
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })()}
+                <p style={{ fontSize: 9, color: "#7A5848", marginTop: 6, marginBottom: 0 }}>
+                  Lo que elijas pisa el alias anterior de esta descripción.
+                </p>
+              </div>
             )}
           </div>
         );
@@ -1955,11 +2127,12 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
                     const m = matchearArticulo(pruebaCod, pruebaDesc, cat, aliases || {});
                     const colores = { ok: "#10B981", alias: "#10B981", solo_codigo: "#10B981",
                                       similar: "#A85D43", revisar: "#F59E0B",
-                                      ambiguo: "#F59E0B", sin_match: "#B3261E" };
+                                      ambiguo: "#F59E0B", conjunto: "#7C3AED", sin_match: "#B3261E" };
                     const textos = { ok: "✓ Match seguro", alias: "✓ Por alias aprendido",
                                      solo_codigo: "✓ Por código (sin descripción)",
                                      similar: "≈ Similar a", revisar: "⚠ Chequear este art",
                                      ambiguo: "⚠ Dos artículos posibles — hay que elegir",
+                                     conjunto: "⊞ Conjunto — hay que elegir los componentes",
                                      sin_match: "✕ Sin match" };
                     return (
                       <div style={{ background: "#FFFFFF", borderRadius: 8, padding: 10 }}>
@@ -1973,6 +2146,17 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
                               ? <span style={{ color: "#10B981" }}> · costo ${m.costo_total}</span>
                               : <span style={{ color: "#B3261E" }}> · ⚠ sin costo cargado</span>}
                           </p>
+                        )}
+                        {m.estado === "conjunto" && (
+                          <div style={{ marginBottom: 6 }}>
+                            <p style={{ fontSize: 10, color: "#7A5848", marginBottom: 3 }}>Artículos que coinciden con las palabras:</p>
+                            {candidatosConjunto(pruebaDesc, cat).map((o, k) => (
+                              <p key={k} style={{ fontSize: 11, color: "#5A3828", margin: 0 }}>
+                                <b>{o.codigo}</b> — {o.descripcion}
+                                {o.costo_total !== null ? ` · $${o.costo_total}` : " · sin costo"}
+                              </p>
+                            ))}
+                          </div>
                         )}
                         <p style={{ fontSize: 10, color: "#7A5848", marginBottom: 3 }}>Más parecidos:</p>
                         {m.candidatos.map((cd, i) => (
