@@ -25,25 +25,53 @@ const costosUrl = "https://dptfgqdybjuhsehyhuyy.supabase.co";
 const costosKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRwdGZncWR5Ymp1aHNlaHlodXl5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgyNDM4OTEsImV4cCI6MjA5MzgxOTg5MX0.Pek-PptrKcUYh6jCKocnhqO4umbUx5LWtgwrE4WzjF4";
 const sbCostos = supabase.createClient(costosUrl, costosKey, { db: { schema: "costos" } });
 
-// Lista todas las tablas/vistas expuestas del schema costos (via OpenAPI de PostgREST)
+// Cliente extra: schema public del proyecto de Costos
+const sbCostosPub = supabase.createClient(costosUrl, costosKey);
+
+// Nombres candidatos de tablas donde podrian estar las descripciones
+const CANDIDATAS = ["articulos","articulo","productos","producto","catalogo","catalogos",
+  "prendas","prenda","modelos","modelo","fichas","ficha","items","item",
+  "descripciones","articulos_descripcion","costo_articulo","art","arts"];
+
+// Lista tablas via OpenAPI de PostgREST, en ambos schemas
 async function listarTablasCostos() {
-  try {
-    const resp = await fetch(`${costosUrl}/rest/v1/`, {
-      headers: { apikey: costosKey, Authorization: `Bearer ${costosKey}`, "Accept-Profile": "costos" }
-    });
-    const spec = await resp.json();
-    const nombres = Object.keys(spec.definitions || spec.paths || {})
-      .map(k => k.replace(/^\//, ""))
-      .filter(k => k && k !== "rpc" && !k.startsWith("rpc/"));
-    return { ok: true, error: null, tablas: [...new Set(nombres)] };
-  } catch (e) {
-    return { ok: false, error: String(e), tablas: [] };
+  const encontradas = [];
+  const errores = [];
+
+  for (const schema of ["costos", "public"]) {
+    try {
+      const headers = { apikey: costosKey, Authorization: `Bearer ${costosKey}` };
+      if (schema !== "public") headers["Accept-Profile"] = schema;
+      const resp = await fetch(`${costosUrl}/rest/v1/`, { headers });
+      const spec = await resp.json();
+      const desdeDef = Object.keys(spec.definitions || {});
+      const desdePaths = Object.keys(spec.paths || {}).map(k => k.replace(/^\//, ""));
+      const nombres = [...new Set([...desdeDef, ...desdePaths])]
+        .filter(n => n && n !== "rpc" && !n.startsWith("rpc/"));
+      nombres.forEach(n => encontradas.push({ schema, nombre: n, via: "openapi" }));
+    } catch (e) {
+      errores.push(`${schema}: ${String(e)}`);
+    }
   }
+
+  // Fuerza bruta: probar nombres conocidos en ambos schemas
+  for (const schema of ["costos", "public"]) {
+    const cli = schema === "costos" ? sbCostos : sbCostosPub;
+    for (const nombre of CANDIDATAS) {
+      const yaEsta = encontradas.some(e => e.schema === schema && e.nombre === nombre);
+      if (yaEsta) continue;
+      const { error } = await cli.from(nombre).select("*").limit(1);
+      if (!error) encontradas.push({ schema, nombre, via: "prueba" });
+    }
+  }
+
+  return { ok: true, error: errores.join(" | ") || null, tablas: encontradas };
 }
 
 // Trae las primeras filas de cualquier tabla del schema costos
-async function espiarTablaCostos(nombre) {
-  const { data, error } = await sbCostos.from(nombre).select("*").limit(5);
+async function espiarTablaCostos(nombre, schema = "costos") {
+  const cli = schema === "costos" ? sbCostos : sbCostosPub;
+  const { data, error } = await cli.from(nombre).select("*").limit(5);
   if (error) return { ok: false, error: error.message || JSON.stringify(error), rows: [] };
   return { ok: true, error: null, rows: data || [] };
 }
@@ -1468,10 +1496,10 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
     setCargandoTablas(false);
   };
 
-  const verTabla = async (nombre) => {
-    setTablaSel(nombre);
+  const verTabla = async (nombre, schema) => {
+    setTablaSel(`${schema}.${nombre}`);
     setMuestra({ cargando: true });
-    const r = await espiarTablaCostos(nombre);
+    const r = await espiarTablaCostos(nombre, schema);
     setMuestra(r);
   };
 
@@ -1553,7 +1581,7 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
             Buscar dónde están los nombres/descripciones de los artículos:
           </p>
           <button className="btn btn-primary btn-sm" onClick={buscarTablas} disabled={cargandoTablas}>
-            {cargandoTablas ? "Buscando..." : "Ver tablas de Costos"}
+            {cargandoTablas ? "Buscando... (tarda unos segundos)" : "Ver tablas de Costos"}
           </button>
 
           {tablas && !tablas.ok && (
@@ -1563,17 +1591,26 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
           {tablas && tablas.ok && (
             <div style={{ marginTop: 12 }}>
               <p style={{ fontSize: 11, color: "#7A5848", marginBottom: 8 }}>
-                {tablas.tablas.length} tablas — tocá una para ver qué tiene adentro:
+                {tablas.tablas.length} tablas encontradas — tocá una para ver qué tiene adentro:
               </p>
+              {tablas.tablas.length === 0 && (
+                <p style={{ fontSize: 11, color: "#B3261E" }}>
+                  No se encontró ninguna tabla. Decime cómo se llama y la busco directo.
+                </p>
+              )}
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {tablas.tablas.map(t => (
-                  <button key={t} onClick={() => verTabla(t)}
-                    style={{ background: tablaSel === t ? "#A85D43" : "#FFF8F5", color: tablaSel === t ? "#fff" : "#5A3828",
-                             border: "1px solid #D4A090", borderRadius: 6, padding: "5px 10px", fontSize: 11,
-                             cursor: "pointer", fontFamily: "inherit" }}>
-                    {t}
-                  </button>
-                ))}
+                {tablas.tablas.map(t => {
+                  const etiqueta = `${t.schema}.${t.nombre}`;
+                  return (
+                    <button key={etiqueta} onClick={() => verTabla(t.nombre, t.schema)}
+                      style={{ background: tablaSel === etiqueta ? "#A85D43" : "#FFF8F5",
+                               color: tablaSel === etiqueta ? "#fff" : "#5A3828",
+                               border: "1px solid #D4A090", borderRadius: 6, padding: "5px 10px", fontSize: 11,
+                               cursor: "pointer", fontFamily: "inherit" }}>
+                      {etiqueta}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
