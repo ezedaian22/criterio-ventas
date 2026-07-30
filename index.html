@@ -76,6 +76,52 @@ async function espiarTablaCostos(nombre, schema = "costos") {
   return { ok: true, error: null, rows: data || [] };
 }
 
+// Catalogo completo: articulos (codigo + descripcion) cruzado con costo_articulo (costo_total)
+async function armarCatalogoCompleto() {
+  const { data: arts, error: e1 } = await sbCostos.from("articulos").select("*").limit(5000);
+  if (e1) return { ok: false, error: "articulos: " + (e1.message || JSON.stringify(e1)), rows: [] };
+
+  const { data: cst, error: e2 } = await sbCostos.from("costo_articulo").select("*").limit(5000);
+  if (e2) return { ok: false, error: "costo_articulo: " + (e2.message || JSON.stringify(e2)), rows: [] };
+
+  const norm = s => String(s || "").trim().toUpperCase().replace(/\s+/g, "");
+  const mapaCosto = {};
+  (cst || []).forEach(r => { mapaCosto[norm(r.codigo)] = r.costo_total; });
+
+  // Detecta el campo de descripcion sin asumir el nombre exacto
+  const campoDesc = (a) => a.descripcion ?? a.description ?? a.nombre ?? a.detalle ?? "";
+
+  // Dedup por codigo: gana la fila con descripcion mas larga (ficha mas completa)
+  const porCodigo = {};
+  (arts || []).forEach(a => {
+    const cod = norm(a.codigo);
+    if (!cod) return;
+    const desc = String(campoDesc(a) || "").trim();
+    const prev = porCodigo[cod];
+    if (!prev || desc.length > String(prev.descripcion || "").length) {
+      porCodigo[cod] = {
+        codigo: String(a.codigo).trim(),
+        descripcion: desc,
+        categoria: a.categoria ?? null,
+        temporada_id: a.temporada_id ?? null,
+      };
+    }
+  });
+
+  const rows = Object.values(porCodigo).map(a => ({
+    ...a,
+    costo_total: mapaCosto[norm(a.codigo)] ?? null,
+  }));
+
+  return {
+    ok: true, error: null, rows,
+    filasArticulos: (arts || []).length,
+    filasCosto: (cst || []).length,
+    conDesc: rows.filter(r => r.descripcion).length,
+    conCosto: rows.filter(r => r.costo_total !== null).length,
+  };
+}
+
 // Diagnostico: trae el catalogo de articulos con sus costos
 async function traerCatalogoCostos() {
   const { data, error } = await sbCostos.from("costo_articulo").select("*").limit(1000);
@@ -1496,6 +1542,15 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
     setCargandoTablas(false);
   };
 
+  const [catFull, setCatFull] = useState(null);
+  const [armandoCat, setArmandoCat] = useState(false);
+  const armarCat = async () => {
+    setArmandoCat(true); setCatFull(null);
+    const r = await armarCatalogoCompleto();
+    setCatFull(r);
+    setArmandoCat(false);
+  };
+
   const verTabla = async (nombre, schema) => {
     setTablaSel(`${schema}.${nombre}`);
     setMuestra({ cargando: true });
@@ -1578,7 +1633,44 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
         {/* Explorador del schema costos */}
         <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #E8C4B0" }}>
           <p style={{ fontSize: 12, color: "#5A3828", marginBottom: 10 }}>
-            Buscar dónde están los nombres/descripciones de los artículos:
+            Catálogo completo (código + descripción + costo):
+          </p>
+          <button className="btn btn-primary btn-sm" onClick={armarCat} disabled={armandoCat} style={{ marginBottom: 14 }}>
+            {armandoCat ? "Armando..." : "Armar catálogo completo"}
+          </button>
+
+          {catFull && !catFull.ok && (
+            <p style={{ fontSize: 11, color: "#B3261E", marginBottom: 12, wordBreak: "break-word" }}>{catFull.error}</p>
+          )}
+
+          {catFull && catFull.ok && (
+            <div style={{ marginBottom: 16, background: "#FFF0E8", borderRadius: 8, padding: 12 }}>
+              <p style={{ fontSize: 13, fontWeight: 700, color: "#5A3828", marginBottom: 6 }}>
+                {catFull.rows.length} artículos únicos
+              </p>
+              <p style={{ fontSize: 11, color: "#6B4A3E", marginBottom: 2 }}>
+                Filas crudas: {catFull.filasArticulos} en articulos · {catFull.filasCosto} en costo_articulo
+              </p>
+              <p style={{ fontSize: 11, color: catFull.conDesc === catFull.rows.length ? "#10B981" : "#A85D43", marginBottom: 2 }}>
+                Con descripción: {catFull.conDesc} de {catFull.rows.length}
+              </p>
+              <p style={{ fontSize: 11, color: catFull.conCosto === catFull.rows.length ? "#10B981" : "#A85D43", marginBottom: 8 }}>
+                Con costo: {catFull.conCosto} de {catFull.rows.length}
+              </p>
+              <div style={{ background: "#FFFFFF", borderRadius: 6, padding: 8, maxHeight: 240, overflowY: "auto" }}>
+                {catFull.rows.slice(0, 25).map((r, i) => (
+                  <div key={i} style={{ fontSize: 11, color: "#5A3828", padding: "3px 0", borderBottom: "1px solid #F0E0D8" }}>
+                    <b>{r.codigo}</b> — {r.descripcion || <i style={{ color: "#B3261E" }}>sin descripción</i>}
+                    {r.costo_total !== null ? ` · $${r.costo_total}` : <span style={{ color: "#B3261E" }}> · sin costo</span>}
+                  </div>
+                ))}
+              </div>
+              <p style={{ fontSize: 10, color: "#7A5848", marginTop: 6 }}>Primeros 25</p>
+            </div>
+          )}
+
+          <p style={{ fontSize: 12, color: "#5A3828", marginBottom: 10 }}>
+            Explorar tablas del proyecto de Costos:
           </p>
           <button className="btn btn-primary btn-sm" onClick={buscarTablas} disabled={cargandoTablas}>
             {cargandoTablas ? "Buscando... (tarda unos segundos)" : "Ver tablas de Costos"}
