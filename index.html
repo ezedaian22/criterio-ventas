@@ -463,13 +463,36 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso }) {
   const [activeIdx, setActiveIdx] = useState(null);
   const [savedCount, setSavedCount] = useState(0);
   const [manualOpen, setManualOpen] = useState(false);
-  const [manualForm, setManualForm] = useState({ cliente: "", vendedoraId: "", total: "", fecha: new Date().toISOString().split("T")[0], nota: "" });
   const [manualSaved, setManualSaved] = useState(false);
   const processingRef = useRef(false);
 
+  // ── Mes del lote que se está cargando ──
+  const MESES_N = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+  const hoyStr = () => new Date().toISOString().split("T")[0];
+  const mesActualKey = hoyStr().substring(0, 7);
+  const [mesLote, setMesLote] = useState(mesActualKey);
+
+  // Si el lote es del mes actual usa el día de hoy; si es de un mes anterior usa el día 15
+  const fechaLote = (mk = mesLote) => mk === mesActualKey ? hoyStr() : `${mk}-15`;
+
+  // Últimos 4 meses como opciones
+  const opcionesMes = (() => {
+    const out = [];
+    const d = new Date();
+    d.setDate(1);
+    for (let i = 0; i < 4; i++) {
+      const y = d.getFullYear(), m = d.getMonth();
+      out.push({ key: `${y}-${String(m + 1).padStart(2, "0")}`, label: `${MESES_N[m]} ${y}` });
+      d.setMonth(d.getMonth() - 1);
+    }
+    return out;
+  })();
+
+  const [manualForm, setManualForm] = useState({ cliente: "", vendedoraId: "", total: "", fecha: hoyStr(), nota: "" });
+
   const defaultForm = () => ({
     cliente: "", vendedoraId: "", total: "",
-    fecha: new Date().toISOString().split("T")[0], nota: ""
+    fecha: fechaLote(), nota: ""
   });
 
   const buildForm = (extracted, prevForm) => {
@@ -480,7 +503,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso }) {
       cliente: extracted?.cliente || prevForm?.cliente || "",
       vendedoraId: vendedoraIdAuto ? String(vendedoraIdAuto) : (prevForm?.vendedoraId || ""),
       total: totalFinal !== null && totalFinal !== undefined && totalFinal !== "" ? totalFinal : (prevForm?.total || ""),
-      fecha: new Date().toISOString().split("T")[0],
+      fecha: fechaLote(),
       nota: prevForm?.nota || "",
     };
   };
@@ -596,6 +619,19 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso }) {
           </button>
         </div>
         <p style={{ fontSize: 12, color: "#7A5848", marginTop: 10 }}>Seleccioná todas las fotos del día de una vez — desde el carrete o reenviadas de WhatsApp</p>
+
+        {/* Mes del lote */}
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #E8C4B0" }}>
+          <label style={{ fontSize: 12, color: "#5A3828", marginBottom: 6, display: "block" }}>Mes de estas ventas</label>
+          <select className="input" value={mesLote} onChange={e => setMesLote(e.target.value)} style={{ maxWidth: 220, margin: "0 auto" }}>
+            {opcionesMes.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+          </select>
+          {mesLote !== mesActualKey && (
+            <p style={{ fontSize: 12, color: "#A85D43", fontWeight: 600, marginTop: 8 }}>
+              ⚠ Cargando ventas de {opcionesMes.find(o => o.key === mesLote)?.label} — se guardarán con fecha {fechaLote()}
+            </p>
+          )}
+        </div>
         {savedCount > 0 && <p style={{ marginTop: 10, fontSize: 13, color: "#10B981", fontWeight: 600 }}>✓ {savedCount} {savedCount === 1 ? "venta guardada" : "ventas guardadas"}</p>}
       </div>
 
@@ -768,7 +804,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso }) {
             if (!manualForm.vendedoraId || !manualForm.total) return;
             await addVenta({ ...manualForm, vendedoraId: Number(manualForm.vendedoraId), total: Number(manualForm.total) });
             setManualSaved(true);
-            setManualForm({ cliente: "", vendedoraId: "", total: "", fecha: new Date().toISOString().split("T")[0], nota: "" });
+            setManualForm({ cliente: "", vendedoraId: "", total: "", fecha: fechaLote(), nota: "" });
             setTimeout(() => { setManualSaved(false); setManualOpen(false); }, 2000);
           }} disabled={!manualForm.vendedoraId || !manualForm.total} style={{ padding: 14, fontSize: 15, opacity: (!manualForm.vendedoraId || !manualForm.total) ? 0.5 : 1 }}>
             Guardar venta
