@@ -409,6 +409,18 @@ function App({ onLogout }) {
     if (saved) setPagos(p => [...p, { ...saved, vendedoraId: saved.vendedora_id }]);
   };
 
+  // Guarda que tal descripcion escrita a mano corresponde a tal articulo.
+  // Al actualizar el estado `aliases`, el item se re-matchea solo y queda en verde.
+  const guardarAlias = async (textoLeido, codigo) => {
+    const clave = normTexto(textoLeido);
+    if (!clave || !codigo) return { ok: false, error: "falta texto o código" };
+    setAliases(a => ({ ...a, [clave]: codigo }));
+    const { error } = await sb.from("articulo_alias")
+      .upsert([{ texto: clave, articulo_codigo: String(codigo) }], { onConflict: "texto" });
+    if (error) return { ok: false, error: error.message || JSON.stringify(error) };
+    return { ok: true, error: null };
+  };
+
   const marcarVentasPagadas = async (ids) => {
     for (const id of ids) {
       await dbUpdate("ventas", id, { pagado: true });
@@ -498,7 +510,7 @@ function App({ onLogout }) {
 
       <div style={{ maxWidth: 900, margin: "0 auto", padding: "24px 24px" }} className="fade-in">
         {tab === "dashboard" && <Dashboard ventas={ventas} vendedoras={vendedoras} pagos={pagos} currentMes={currentMes} getComisionMes={getComisionMes} getPagadoMes={getPagadoMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
-        {tab === "nueva" && <NuevaVenta vendedoras={vendedoras} clientes={clientes} addVenta={addVenta} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} />}
+        {tab === "nueva" && <NuevaVenta vendedoras={vendedoras} clientes={clientes} addVenta={addVenta} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} />}
         {tab === "comisiones" && <Comisiones ventas={ventas} vendedoras={vendedoras} pagos={pagos} addPago={addPago} marcarVentasPagadas={marcarVentasPagadas} currentMes={currentMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "historial" && <Historial ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "comparar" && <Comparar ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
@@ -655,8 +667,21 @@ async function extraerDatosFotoBase64(base64, mediaType) {
   throw lastError || new Error("No se pudo procesar la imagen");
 }
 
-function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases }) {
+function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias }) {
   const [expanded, setExpanded] = React.useState(false);
+  const [guardado, setGuardado] = React.useState({});
+  const [errorAlias, setErrorAlias] = React.useState(null);
+
+  const elegir = async (textoLeido, codigo, idx) => {
+    if (!guardarAlias) return;
+    const r = await guardarAlias(textoLeido, codigo);
+    if (r.ok) {
+      setGuardado(g => ({ ...g, [idx]: codigo }));
+      setErrorAlias(null);
+    } else {
+      setErrorAlias(r.error);
+    }
+  };
   const items = extracted.items || [];
 
   const hayCat = catalogo && catalogo.length > 0;
@@ -716,8 +741,30 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases }) {
               </p>
             )}
             {x.m && (x.m.estado === "revisar" || x.m.estado === "sin_match" || x.m.estado === "similar" || x.m.estado === "ambiguo") && x.m.candidatos.length > 0 && (
-              <p style={{ fontSize: 10, color: "#7A5848", margin: "2px 0 0 0" }}>
-                Opciones: {x.m.candidatos.map(cd => `${cd.codigo} (${Math.round(cd.score * 100)}%)`).join(" · ")}
+              <div style={{ margin: "4px 0 0 0" }}>
+                <p style={{ fontSize: 10, color: "#7A5848", margin: "0 0 3px 0" }}>
+                  Tocá el correcto y queda recordado para siempre:
+                </p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {x.m.candidatos.map((cd, j) => {
+                    const esElegido = guardado[i] === cd.codigo;
+                    return (
+                      <button key={j} onClick={() => elegir(x.it.descripcion, cd.codigo, i)}
+                        style={{ background: esElegido ? "#10B981" : "#FFF8F5",
+                                 color: esElegido ? "#fff" : "#5A3828",
+                                 border: `1px solid ${esElegido ? "#10B981" : "#D4A090"}`,
+                                 borderRadius: 6, padding: "4px 8px", fontSize: 10,
+                                 cursor: "pointer", fontFamily: "inherit", textAlign: "left", maxWidth: "100%" }}>
+                        {esElegido ? "✓ " : ""}<b>{cd.codigo}</b> — {cd.descripcion} ({Math.round(cd.score * 100)}%)
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {guardado[i] && (
+              <p style={{ fontSize: 10, color: "#10B981", margin: "3px 0 0 0", fontWeight: 600 }}>
+                ✓ Guardado: de ahora en más "{x.it.descripcion}" va a matchear solo con {guardado[i]}
               </p>
             )}
           </div>
@@ -758,6 +805,12 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases }) {
         </div>
       )}
 
+      {errorAlias && (
+        <p style={{ fontSize: 10, color: "#B3261E", marginTop: 6 }}>
+          No se pudo guardar el alias: {errorAlias}
+        </p>
+      )}
+
       {!hayCat && (
         <p style={{ fontSize: 10, color: "#7A5848", marginTop: 6 }}>Catálogo no cargado — sin matching de artículos</p>
       )}
@@ -765,7 +818,7 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases }) {
   );
 }
 
-function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases }) {
+function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases, guardarAlias }) {
   const fileRef = useRef();
   const fileRefMulti = useRef();
 
@@ -1007,7 +1060,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
                     </div>
                   )}
                   {activeItem.extracted && (
-                    <ItemsDetectados extracted={activeItem.extracted} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} />
+                    <ItemsDetectados extracted={activeItem.extracted} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} />
                   )}
                 </div>
               </div>
