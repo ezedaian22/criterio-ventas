@@ -370,14 +370,13 @@ function StatCard({ label, value, accent, sub }) {
 const PROMPT_EXTRACCION = `Analizá este presupuesto/comprobante de venta de ropa. Extraé los siguientes datos y respondé SOLO con un JSON válido sin backticks ni texto extra:
 {
   "cliente": "nombre del cliente o null",
-  "fecha": "fecha en formato YYYY-MM-DD o null",
   "total": número total de la venta como número (sin descuento aplicado si hay uno separado) o null,
   "totalConDescuento": número total final después del descuento o null,
   "items": [{"descripcion": "...", "cantidad": N, "precio": N, "total": N}],
   "descuento": número de descuento aplicado o null,
   "notas": "cualquier nota relevante o null"
 }
-Si no podés leer algún campo, poné null.`;
+No leas la fecha del comprobante. Si no podés leer algún campo, poné null.`;
 
 const BACKUP_API_KEY = "AIzaSyDaAuhseWd2ktPgwi0w1AzKjHRoQyIIHg8";
 let lastKeyUsed = 0; // 0 = primary, 1 = backup
@@ -481,7 +480,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso }) {
       cliente: extracted?.cliente || prevForm?.cliente || "",
       vendedoraId: vendedoraIdAuto ? String(vendedoraIdAuto) : (prevForm?.vendedoraId || ""),
       total: totalFinal !== null && totalFinal !== undefined && totalFinal !== "" ? totalFinal : (prevForm?.total || ""),
-      fecha: extracted?.fecha || prevForm?.fecha || new Date().toISOString().split("T")[0],
+      fecha: new Date().toISOString().split("T")[0],
       nota: prevForm?.nota || "",
     };
   };
@@ -1495,4 +1494,3 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
   </script>
 </body>
 </html>
-
