@@ -574,207 +574,206 @@ function App({ onLogout }) {
 
 // ─── RESUMEN MES A MES ───────────────────────────────────────────────────────
 function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
-  const [verComision, setVerComision] = useState(true);
-  const [comparar, setComparar] = useState(true);
+  const anioHoy = new Date().getFullYear();
+  const mesHoy = new Date().getMonth();
+  const [anio, setAnio] = useState(anioHoy);
+  const [verPct, setVerPct] = useState(true);
 
   const fmtCorto = (n) => {
     const v = Number(n || 0);
-    if (v === 0) return "—";
+    if (!v) return "";
     if (Math.abs(v) >= 1000000) return (v / 1000000).toFixed(1).replace(".", ",") + "M";
     if (Math.abs(v) >= 1000) return Math.round(v / 1000) + "k";
     return String(Math.round(v));
   };
 
-  const meses = (() => {
-    const out = [];
-    const d = new Date(); d.setDate(1);
-    for (let i = 11; i >= 0; i--) {
-      const t = new Date(d); t.setMonth(d.getMonth() - i);
-      out.push({
-        key: `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}`,
-        prev: `${t.getFullYear() - 1}-${String(t.getMonth() + 1).padStart(2, "0")}`,
-        label: MESES[t.getMonth()],
-        anio: String(t.getFullYear()).slice(2),
-      });
-    }
-    return out;
-  })();
-
+  // Ventas y comision acumuladas por mes-clave
   const porMes = (() => {
     const m = {};
     ventas.forEach(v => {
       const k = getMonthKey(v.fecha);
       if (!k) return;
-      const vid = v.vendedora_id || v.vendedoraId;
-      if (!m[k]) m[k] = { total: 0, ops: 0, porVend: {} };
+      const vend = vendedoras.find(x => x.id === (v.vendedora_id || v.vendedoraId));
       const monto = Number(v.total || 0);
+      if (!m[k]) m[k] = { total: 0, comision: 0, ops: 0 };
       m[k].total += monto;
       m[k].ops += 1;
-      m[k].porVend[vid] = (m[k].porVend[vid] || 0) + monto;
+      m[k].comision += vend ? monto * vend.comision / 100 : 0;
     });
     return m;
   })();
 
-  const dm = (k) => porMes[k] || { total: 0, ops: 0, porVend: {} };
-  const valVend = (k, v) => {
-    const vendido = dm(k).porVend[v.id] || 0;
-    return verComision ? vendido * v.comision / 100 : vendido;
-  };
-  const comisionMes = (k) => vendedoras.reduce((s, v) => s + (dm(k).porVend[v.id] || 0) * v.comision / 100, 0);
+  const dm = (a, i) => porMes[`${a}-${String(i + 1).padStart(2, "0")}`] || { total: 0, comision: 0, ops: 0 };
+  const sumaAnio = (a, campo) => MESES.reduce((s, _, i) => s + dm(a, i)[campo], 0);
   const pct = (a, b) => (!b ? null : Math.round(((a - b) / b) * 100));
 
-  const totAct = meses.reduce((s, m) => s + dm(m.key).total, 0);
-  const totAnt = meses.reduce((s, m) => s + dm(m.prev).total, 0);
-  const totOps = meses.reduce((s, m) => s + dm(m.key).ops, 0);
-  const totCom = meses.reduce((s, m) => s + comisionMes(m.key), 0);
-  const pctTot = pct(totAct, totAnt);
+  const anioAnt = anio - 1;
+  const totVA = sumaAnio(anio, "total"), totVB = sumaAnio(anioAnt, "total");
+  const totCA = sumaAnio(anio, "comision"), totCB = sumaAnio(anioAnt, "comision");
+  const totOpsA = sumaAnio(anio, "ops"), totOpsB = sumaAnio(anioAnt, "ops");
+  const pctV = pct(totVA, totVB);
 
-  const Celda = ({ act, ant, bold, color }) => (
-    <td style={{ padding: "6px 4px", textAlign: "center", whiteSpace: "nowrap",
-                 borderLeft: "1px solid #F4E6DE" }}>
-      <div style={{ fontSize: 13, fontWeight: bold ? 700 : 500,
-                    color: act > 0 ? (color || "#2C1A14") : "#C9B3A8" }}>
-        {fmtCorto(act)}
-      </div>
-      {comparar && act > 0 && (() => {
-        const p = pct(act, ant);
-        if (p === null) return <div style={{ fontSize: 9, color: "#C9B3A8" }}>·</div>;
-        return <div style={{ fontSize: 9, fontWeight: 600,
-                             color: p > 0 ? "#10B981" : p < 0 ? "#F87171" : "#9A7570" }}>
-          {p > 0 ? "+" : ""}{p}%
-        </div>;
-      })()}
+  const esFuturo = (a, i) => a === anioHoy && i > mesHoy;
+
+  const celda = (val, esFut, extra = {}) => (
+    <td style={{ padding: "8px 4px", textAlign: "center", whiteSpace: "nowrap",
+                 borderLeft: "1px solid #F4E6DE",
+                 background: esFut ? "#FAF3EF" : "transparent", ...extra }}>
+      {esFut ? <span style={{ fontSize: 11, color: "#D8C4BA" }}>·</span>
+             : <span style={{ fontSize: 14, fontWeight: 600, color: val ? (extra.color || "#2C1A14") : "#D8C4BA" }}>
+                 {val ? fmtCorto(val) : "—"}
+               </span>}
     </td>
   );
 
-  const thMes = (m, i) => (
-    <th key={m.key} style={{ padding: "6px 4px", textAlign: "center", whiteSpace: "nowrap",
-                             borderLeft: "1px solid #F4E6DE",
-                             background: i === meses.length - 1 ? "#FFE4D6" : "transparent" }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: "#5A3828" }}>{m.label}</div>
-      <div style={{ fontSize: 9, color: "#9A7570" }}>{m.anio}</div>
-    </th>
-  );
-
-  const tdLabel = { padding: "6px 10px", textAlign: "left", whiteSpace: "nowrap",
-                    position: "sticky", left: 0, background: "#FFFDFB", zIndex: 1 };
+  const tdLabel = { padding: "8px 12px", textAlign: "left", whiteSpace: "nowrap",
+                    position: "sticky", left: 0, zIndex: 1 };
+  const tdTotal = { padding: "8px 10px", textAlign: "center", whiteSpace: "nowrap",
+                    borderLeft: "2px solid #E8C4B0", fontSize: 14, fontWeight: 700 };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
 
-      {/* Barra compacta: totales + controles en una sola linea */}
-      <div className="card" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 18, padding: "12px 16px" }}>
+      {/* Barra de totales + controles */}
+      <div className="card" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 20, padding: "12px 16px" }}>
         <div>
-          <span style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em" }}>Vendido 12m </span>
-          <span style={{ fontSize: 17, fontWeight: 700, color: "#2C1A14" }}>{fmtPeso(totAct)}</span>
-          {comparar && pctTot !== null && (
-            <span style={{ fontSize: 12, fontWeight: 600, marginLeft: 6,
-                           color: pctTot >= 0 ? "#10B981" : "#F87171" }}>
-              {pctTot > 0 ? "+" : ""}{pctTot}%
+          <span style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em" }}>Ventas {anio} </span>
+          <span style={{ fontSize: 18, fontWeight: 700, color: "#2C1A14" }}>{fmtPeso(totVA)}</span>
+          {pctV !== null && (
+            <span style={{ fontSize: 12, fontWeight: 600, marginLeft: 6, color: pctV >= 0 ? "#10B981" : "#F87171" }}>
+              {pctV > 0 ? "+" : ""}{pctV}% vs {anioAnt}
             </span>
           )}
         </div>
         <div>
           <span style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em" }}>Comisiones </span>
-          <span style={{ fontSize: 17, fontWeight: 700, color: "#A85D43" }}>{fmtPeso(totCom)}</span>
-        </div>
-        <div>
-          <span style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em" }}>Ops </span>
-          <span style={{ fontSize: 17, fontWeight: 700, color: "#2C1A14" }}>{totOps}</span>
+          <span style={{ fontSize: 18, fontWeight: 700, color: "#A85D43" }}>{fmtPeso(totCA)}</span>
         </div>
 
-        <div style={{ display: "flex", gap: 6, marginLeft: "auto", flexWrap: "wrap" }}>
-          <div style={{ display: "flex", border: "1px solid #D4A090", borderRadius: 7, overflow: "hidden" }}>
-            <button onClick={() => setVerComision(true)}
-              style={{ background: verComision ? "#A85D43" : "#FFF8F5", color: verComision ? "#fff" : "#5A3828",
-                       border: "none", padding: "5px 11px", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>Comisión</button>
-            <button onClick={() => setVerComision(false)}
-              style={{ background: !verComision ? "#A85D43" : "#FFF8F5", color: !verComision ? "#fff" : "#5A3828",
-                       border: "none", padding: "5px 11px", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>Vendido</button>
-          </div>
-          <button onClick={() => setComparar(v => !v)}
-            style={{ background: comparar ? "#A85D43" : "#FFF8F5", color: comparar ? "#fff" : "#5A3828",
+        <div style={{ display: "flex", gap: 6, marginLeft: "auto", alignItems: "center", flexWrap: "wrap" }}>
+          <button onClick={() => setAnio(a => a - 1)}
+            style={{ background: "#FFF8F5", border: "1px solid #D4A090", borderRadius: 7, padding: "5px 10px",
+                     fontSize: 13, cursor: "pointer", fontFamily: "inherit", fontWeight: 700 }}>‹</button>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "#5A3828", minWidth: 74, textAlign: "center" }}>
+            {anio} vs {anioAnt}
+          </span>
+          <button onClick={() => setAnio(a => Math.min(anioHoy, a + 1))} disabled={anio >= anioHoy}
+            style={{ background: anio >= anioHoy ? "#F4E6DE" : "#FFF8F5", border: "1px solid #D4A090",
+                     borderRadius: 7, padding: "5px 10px", fontSize: 13,
+                     cursor: anio >= anioHoy ? "default" : "pointer", fontFamily: "inherit", fontWeight: 700,
+                     color: anio >= anioHoy ? "#C9B3A8" : "#5A3828" }}>›</button>
+          <button onClick={() => setVerPct(v => !v)}
+            style={{ background: verPct ? "#A85D43" : "#FFF8F5", color: verPct ? "#fff" : "#5A3828",
                      border: "1px solid #D4A090", borderRadius: 7, padding: "5px 11px", fontSize: 11,
                      cursor: "pointer", fontFamily: "inherit" }}>
-            {comparar ? "✓ " : ""}vs año ant.
+            {verPct ? "✓ " : ""}variación
           </button>
         </div>
       </div>
 
-      {/* Tabla horizontal: meses en columnas */}
+      {/* Tabla: meses en columnas, años en filas */}
       <div className="card" style={{ padding: 0, overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 820 }}>
           <thead>
             <tr style={{ borderBottom: "2px solid #E8C4B0" }}>
-              <th style={{ ...tdLabel, fontSize: 10, color: "#7A5848", textTransform: "uppercase",
-                           letterSpacing: "0.06em", background: "#FFFDFB" }}></th>
-              {meses.map((m, i) => thMes(m, i))}
-              <th style={{ padding: "6px 8px", textAlign: "center", borderLeft: "2px solid #E8C4B0",
-                           fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em" }}>Total</th>
+              <th style={{ ...tdLabel, background: "#FFFDFB" }}></th>
+              {MESES.map((m, i) => (
+                <th key={i} style={{ padding: "8px 4px", textAlign: "center", borderLeft: "1px solid #F4E6DE",
+                                     fontSize: 11, fontWeight: 700,
+                                     color: (anio === anioHoy && i === mesHoy) ? "#A85D43" : "#5A3828",
+                                     background: (anio === anioHoy && i === mesHoy) ? "#FFE4D6" : "transparent" }}>
+                  {m}
+                </th>
+              ))}
+              <th style={{ ...tdTotal, fontSize: 10, color: "#7A5848", textTransform: "uppercase",
+                           letterSpacing: "0.06em", fontWeight: 600 }}>Total</th>
             </tr>
           </thead>
           <tbody>
+            {/* Año actual */}
+            <tr style={{ background: "#FFF8F5" }}>
+              <td style={{ ...tdLabel, background: "#FFF8F5", fontSize: 13, fontWeight: 700, color: "#2C1A14" }}>
+                Ventas <span style={{ color: "#9A7570", fontWeight: 500 }}>{anio}</span>
+              </td>
+              {MESES.map((_, i) => celda(dm(anio, i).total, esFuturo(anio, i)))}
+              <td style={tdTotal}>{fmtCorto(totVA) || "—"}</td>
+            </tr>
             <tr style={{ borderBottom: "2px solid #E8C4B0", background: "#FFF8F5" }}>
-              <td style={{ ...tdLabel, background: "#FFF8F5", fontSize: 12, fontWeight: 700, color: "#2C1A14" }}>Vendido</td>
-              {meses.map(m => <Celda key={m.key} act={dm(m.key).total} ant={dm(m.prev).total} bold />)}
-              <td style={{ padding: "6px 8px", textAlign: "center", borderLeft: "2px solid #E8C4B0",
-                           fontSize: 13, fontWeight: 700 }}>{fmtCorto(totAct)}</td>
+              <td style={{ ...tdLabel, background: "#FFF8F5", fontSize: 13, fontWeight: 600, color: "#A85D43" }}>
+                Comisión <span style={{ color: "#9A7570", fontWeight: 500 }}>{anio}</span>
+              </td>
+              {MESES.map((_, i) => celda(dm(anio, i).comision, esFuturo(anio, i), { color: "#A85D43" }))}
+              <td style={{ ...tdTotal, color: "#A85D43" }}>{fmtCorto(totCA) || "—"}</td>
             </tr>
 
-            <tr style={{ borderBottom: "1px solid #F0E0D8" }}>
-              <td style={{ ...tdLabel, fontSize: 11, color: "#7A5848" }}>Operaciones</td>
-              {meses.map(m => (
-                <td key={m.key} style={{ padding: "5px 4px", textAlign: "center", borderLeft: "1px solid #F4E6DE",
-                                         fontSize: 11, color: dm(m.key).ops > 0 ? "#7A5848" : "#C9B3A8" }}>
-                  {dm(m.key).ops || "—"}
+            {/* Año anterior */}
+            <tr>
+              <td style={{ ...tdLabel, background: "#FFFDFB", fontSize: 13, fontWeight: 700, color: "#7A5848" }}>
+                Ventas <span style={{ color: "#9A7570", fontWeight: 500 }}>{anioAnt}</span>
+              </td>
+              {MESES.map((_, i) => celda(dm(anioAnt, i).total, false, { color: "#7A5848" }))}
+              <td style={{ ...tdTotal, color: "#7A5848" }}>{fmtCorto(totVB) || "—"}</td>
+            </tr>
+            <tr style={{ borderBottom: verPct ? "2px solid #E8C4B0" : "none" }}>
+              <td style={{ ...tdLabel, background: "#FFFDFB", fontSize: 13, fontWeight: 600, color: "#B89080" }}>
+                Comisión <span style={{ color: "#9A7570", fontWeight: 500 }}>{anioAnt}</span>
+              </td>
+              {MESES.map((_, i) => celda(dm(anioAnt, i).comision, false, { color: "#B89080" }))}
+              <td style={{ ...tdTotal, color: "#B89080" }}>{fmtCorto(totCB) || "—"}</td>
+            </tr>
+
+            {/* Variación */}
+            {verPct && (
+              <tr style={{ background: "#FFFDFB" }}>
+                <td style={{ ...tdLabel, background: "#FFFDFB", fontSize: 11, color: "#7A5848" }}>
+                  Variación ventas
+                </td>
+                {MESES.map((_, i) => {
+                  const a = dm(anio, i).total, b = dm(anioAnt, i).total;
+                  const p = pct(a, b);
+                  const fut = esFuturo(anio, i);
+                  return (
+                    <td key={i} style={{ padding: "6px 4px", textAlign: "center", borderLeft: "1px solid #F4E6DE",
+                                         background: fut ? "#FAF3EF" : "transparent" }}>
+                      {fut || p === null || !a
+                        ? <span style={{ fontSize: 10, color: "#D8C4BA" }}>·</span>
+                        : <span style={{ fontSize: 11, fontWeight: 700,
+                                         color: p > 0 ? "#10B981" : p < 0 ? "#F87171" : "#9A7570" }}>
+                            {p > 0 ? "+" : ""}{p}%
+                          </span>}
+                    </td>
+                  );
+                })}
+                <td style={{ padding: "6px 10px", textAlign: "center", borderLeft: "2px solid #E8C4B0" }}>
+                  {pctV === null ? <span style={{ fontSize: 10, color: "#D8C4BA" }}>·</span>
+                    : <span style={{ fontSize: 12, fontWeight: 700, color: pctV > 0 ? "#10B981" : "#F87171" }}>
+                        {pctV > 0 ? "+" : ""}{pctV}%
+                      </span>}
+                </td>
+              </tr>
+            )}
+
+            {/* Operaciones */}
+            <tr style={{ borderTop: "1px solid #F0E0D8" }}>
+              <td style={{ ...tdLabel, background: "#FFFDFB", fontSize: 11, color: "#9A7570" }}>
+                Operaciones {anio} <span style={{ color: "#C9B3A8" }}>/ {anioAnt}</span>
+              </td>
+              {MESES.map((_, i) => (
+                <td key={i} style={{ padding: "6px 4px", textAlign: "center", borderLeft: "1px solid #F4E6DE",
+                                     fontSize: 10, color: "#9A7570",
+                                     background: esFuturo(anio, i) ? "#FAF3EF" : "transparent" }}>
+                  {esFuturo(anio, i) ? "·" : `${dm(anio, i).ops || 0} / ${dm(anioAnt, i).ops || 0}`}
                 </td>
               ))}
-              <td style={{ padding: "5px 8px", textAlign: "center", borderLeft: "2px solid #E8C4B0",
-                           fontSize: 11, color: "#7A5848" }}>{totOps}</td>
-            </tr>
-
-            {vendedoras.map(v => {
-              const suma = meses.reduce((s, m) => s + valVend(m.key, v), 0);
-              return (
-                <tr key={v.id} style={{ borderBottom: "1px solid #F0E0D8" }}>
-                  <td style={tdLabel}>
-                    <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%",
-                                   background: v.color, marginRight: 6 }} />
-                    <span style={{ fontSize: 12, fontWeight: 600 }}>{v.nombre}</span>
-                    <span style={{ fontSize: 9, color: "#9A7570" }}> {v.comision}%</span>
-                  </td>
-                  {meses.map(m => {
-                    const ant = verComision
-                      ? (dm(m.prev).porVend[v.id] || 0) * v.comision / 100
-                      : (dm(m.prev).porVend[v.id] || 0);
-                    return <Celda key={m.key} act={valVend(m.key, v)} ant={ant} color={v.color} />;
-                  })}
-                  <td style={{ padding: "6px 8px", textAlign: "center", borderLeft: "2px solid #E8C4B0",
-                               fontSize: 13, fontWeight: 700, color: v.color }}>{fmtCorto(suma)}</td>
-                </tr>
-              );
-            })}
-
-            <tr style={{ borderTop: "2px solid #E8C4B0", background: "#FFF0E8" }}>
-              <td style={{ ...tdLabel, background: "#FFF0E8", fontSize: 12, fontWeight: 700, color: "#A85D43" }}>
-                {verComision ? "Comisiones" : "Suma vendedoras"}
-              </td>
-              {meses.map(m => {
-                const act = verComision ? comisionMes(m.key) : vendedoras.reduce((s, v) => s + (dm(m.key).porVend[v.id] || 0), 0);
-                const ant = verComision ? comisionMes(m.prev) : vendedoras.reduce((s, v) => s + (dm(m.prev).porVend[v.id] || 0), 0);
-                return <Celda key={m.key} act={act} ant={ant} bold color="#A85D43" />;
-              })}
-              <td style={{ padding: "6px 8px", textAlign: "center", borderLeft: "2px solid #E8C4B0",
-                           fontSize: 13, fontWeight: 700, color: "#A85D43" }}>
-                {fmtCorto(verComision ? totCom : meses.reduce((s, m) => s + vendedoras.reduce((s2, v) => s2 + (dm(m.key).porVend[v.id] || 0), 0), 0))}
-              </td>
+              <td style={{ padding: "6px 10px", textAlign: "center", borderLeft: "2px solid #E8C4B0",
+                           fontSize: 10, color: "#9A7570" }}>{totOpsA} / {totOpsB}</td>
             </tr>
           </tbody>
         </table>
       </div>
 
       <p style={{ fontSize: 10, color: "#7A5848", textAlign: "center", margin: 0 }}>
-        Montos en miles (k) y millones (M) · el mes actual está resaltado · el % compara contra el mismo mes del año anterior
+        Montos en miles (k) y millones (M) · los meses que todavía no llegaron quedan vacíos
       </p>
     </div>
   );
