@@ -552,7 +552,7 @@ function App({ onLogout }) {
             </div>
           </div>
           <div style={{ display: "flex", gap: 0, marginTop: 8, overflowX: "auto", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
-            {[["dashboard","Dashboard"],["nueva","Nueva Venta"],["comisiones","Comisiones"],["historial","Historial"],["comparar","Comparar"],["config","Config"]].map(([k,l]) => (
+            {[["dashboard","Dashboard"],["nueva","Nueva Venta"],["resumen","Resumen"],["comisiones","Comisiones"],["historial","Historial"],["comparar","Comparar"],["config","Config"]].map(([k,l]) => (
               <button key={k} className={`tab-btn ${tab===k?"active":""}`} onClick={() => setTab(k)}>{l}</button>
             ))}
           </div>
@@ -562,11 +562,204 @@ function App({ onLogout }) {
       <div style={{ maxWidth: 900, margin: "0 auto", padding: "24px 24px" }} className="fade-in">
         {tab === "dashboard" && <Dashboard ventas={ventas} vendedoras={vendedoras} pagos={pagos} currentMes={currentMes} getComisionMes={getComisionMes} getPagadoMes={getPagadoMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "nueva" && <NuevaVenta vendedoras={vendedoras} clientes={clientes} addVenta={addVenta} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} />}
+        {tab === "resumen" && <Resumen ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "comisiones" && <Comisiones ventas={ventas} vendedoras={vendedoras} pagos={pagos} addPago={addPago} marcarVentasPagadas={marcarVentasPagadas} currentMes={currentMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "historial" && <Historial ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "comparar" && <Comparar ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "config" && <Config vendedoras={vendedoras} setVendedoras={setVendedoras} clientes={clientes} setClientes={setClientes} ventas={ventas} setVentas={setVentas} setPagos={setPagos} pagos={pagos} catalogo={catalogo} aliases={aliases} />}
       </div>
+    </div>
+  );
+}
+
+// ─── RESUMEN MES A MES ───────────────────────────────────────────────────────
+function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
+  const [verComision, setVerComision] = useState(true);
+  const [comparar, setComparar] = useState(true);
+
+  const fmtCorto = (n) => {
+    const v = Number(n || 0);
+    if (v === 0) return "—";
+    if (Math.abs(v) >= 1000000) return "$" + (v / 1000000).toFixed(1).replace(".", ",") + "M";
+    if (Math.abs(v) >= 1000) return "$" + Math.round(v / 1000) + "k";
+    return "$" + Math.round(v);
+  };
+
+  // Ultimos 12 meses, del mas viejo al mas nuevo
+  const meses = (() => {
+    const out = [];
+    const d = new Date(); d.setDate(1);
+    for (let i = 11; i >= 0; i--) {
+      const t = new Date(d); t.setMonth(d.getMonth() - i);
+      out.push({
+        key: `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}`,
+        prev: `${t.getFullYear() - 1}-${String(t.getMonth() + 1).padStart(2, "0")}`,
+        label: MESES[t.getMonth()],
+        anio: t.getFullYear(),
+      });
+    }
+    return out;
+  })();
+
+  // Totales por mes-clave, calculados una sola vez
+  const porMes = (() => {
+    const m = {};
+    ventas.forEach(v => {
+      const k = getMonthKey(v.fecha);
+      if (!k) return;
+      const vid = v.vendedora_id || v.vendedoraId;
+      if (!m[k]) m[k] = { total: 0, ops: 0, porVend: {} };
+      const monto = Number(v.total || 0);
+      m[k].total += monto;
+      m[k].ops += 1;
+      m[k].porVend[vid] = (m[k].porVend[vid] || 0) + monto;
+    });
+    return m;
+  })();
+
+  const datoMes = (k) => porMes[k] || { total: 0, ops: 0, porVend: {} };
+  const valorVend = (k, v) => {
+    const vendido = datoMes(k).porVend[v.id] || 0;
+    return verComision ? vendido * v.comision / 100 : vendido;
+  };
+
+  const pct = (act, ant) => {
+    if (!ant) return null;
+    return Math.round(((act - ant) / ant) * 100);
+  };
+
+  const totAct = meses.reduce((s, m) => s + datoMes(m.key).total, 0);
+  const totAnt = meses.reduce((s, m) => s + datoMes(m.prev).total, 0);
+  const totOps = meses.reduce((s, m) => s + datoMes(m.key).ops, 0);
+
+  const th = { fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.05em",
+               padding: "6px 8px", textAlign: "right", fontWeight: 600, whiteSpace: "nowrap" };
+  const td = { fontSize: 12, padding: "7px 8px", textAlign: "right", whiteSpace: "nowrap" };
+
+  const Delta = ({ act, ant }) => {
+    if (!comparar) return null;
+    const p = pct(act, ant);
+    if (p === null) return <span style={{ fontSize: 9, color: "#B8A49C" }}>s/d</span>;
+    const col = p > 0 ? "#10B981" : p < 0 ? "#F87171" : "#7A5848";
+    return <span style={{ fontSize: 9, color: col, fontWeight: 600 }}>{p > 0 ? "+" : ""}{p}%</span>;
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+      <div className="card">
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 0, border: "1px solid #D4A090", borderRadius: 8, overflow: "hidden" }}>
+            <button onClick={() => setVerComision(true)}
+              style={{ background: verComision ? "#A85D43" : "#FFF8F5", color: verComision ? "#fff" : "#5A3828",
+                       border: "none", padding: "6px 12px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+              Comisión
+            </button>
+            <button onClick={() => setVerComision(false)}
+              style={{ background: !verComision ? "#A85D43" : "#FFF8F5", color: !verComision ? "#fff" : "#5A3828",
+                       border: "none", padding: "6px 12px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+              Vendido
+            </button>
+          </div>
+          <button onClick={() => setComparar(v => !v)}
+            style={{ background: comparar ? "#A85D43" : "#FFF8F5", color: comparar ? "#fff" : "#5A3828",
+                     border: "1px solid #D4A090", borderRadius: 8, padding: "6px 12px", fontSize: 12,
+                     cursor: "pointer", fontFamily: "inherit" }}>
+            {comparar ? "✓ " : ""}vs año anterior
+          </button>
+        </div>
+        <p style={{ fontSize: 11, color: "#7A5848", marginTop: 8, marginBottom: 0 }}>
+          Últimos 12 meses · las columnas de cada vendedora muestran {verComision ? "su comisión" : "lo que vendió"}
+        </p>
+      </div>
+
+      {/* Totales del período */}
+      <div className="grid2" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 }}>
+        <div className="card">
+          <p style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Vendido 12 meses</p>
+          <p style={{ fontSize: 20, fontWeight: 700, color: "#2C1A14", margin: 0 }}>{fmtPeso(totAct)}</p>
+          {comparar && totAnt > 0 && (
+            <p style={{ fontSize: 11, color: pct(totAct, totAnt) >= 0 ? "#10B981" : "#F87171", margin: "2px 0 0 0", fontWeight: 600 }}>
+              {pct(totAct, totAnt) > 0 ? "+" : ""}{pct(totAct, totAnt)}% vs {fmtPeso(totAnt)}
+            </p>
+          )}
+        </div>
+        <div className="card">
+          <p style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Operaciones</p>
+          <p style={{ fontSize: 20, fontWeight: 700, color: "#2C1A14", margin: 0 }}>{totOps}</p>
+        </div>
+        <div className="card">
+          <p style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Comisiones 12 meses</p>
+          <p style={{ fontSize: 20, fontWeight: 700, color: "#A85D43", margin: 0 }}>
+            {fmtPeso(meses.reduce((s, m) => s + vendedoras.reduce((s2, v) => s2 + (datoMes(m.key).porVend[v.id] || 0) * v.comision / 100, 0), 0))}
+          </p>
+        </div>
+      </div>
+
+      {/* Tabla mes a mes */}
+      <div className="card" style={{ padding: 0, overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 480 }}>
+          <thead>
+            <tr style={{ borderBottom: "2px solid #E8C4B0" }}>
+              <th style={{ ...th, textAlign: "left" }}>Mes</th>
+              <th style={th}>Vendido</th>
+              {vendedoras.map(v => (
+                <th key={v.id} style={{ ...th, color: v.color }}>
+                  {v.nombre}<br />
+                  <span style={{ fontSize: 8, opacity: 0.75 }}>{verComision ? `${v.comision}%` : "vendido"}</span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {meses.map((m, i) => {
+              const d = datoMes(m.key);
+              const dPrev = datoMes(m.prev);
+              const esUltimo = i === meses.length - 1;
+              return (
+                <tr key={m.key} style={{ borderBottom: "1px solid #F0E0D8",
+                                         background: esUltimo ? "#FFF0E8" : "transparent" }}>
+                  <td style={{ ...td, textAlign: "left" }}>
+                    <span style={{ fontWeight: esUltimo ? 700 : 500 }}>{m.label}</span>
+                    <span style={{ fontSize: 10, color: "#9A7570" }}> {String(m.anio).slice(2)}</span>
+                    {d.ops > 0 && <span style={{ fontSize: 9, color: "#B8A49C" }}> · {d.ops}</span>}
+                  </td>
+                  <td style={td}>
+                    <div style={{ fontWeight: 600 }}>{fmtCorto(d.total)}</div>
+                    <Delta act={d.total} ant={dPrev.total} />
+                  </td>
+                  {vendedoras.map(v => {
+                    const act = valorVend(m.key, v);
+                    const ant = verComision
+                      ? (dPrev.porVend[v.id] || 0) * v.comision / 100
+                      : (dPrev.porVend[v.id] || 0);
+                    return (
+                      <td key={v.id} style={td}>
+                        <div style={{ color: act > 0 ? "#2C1A14" : "#C4A090" }}>{fmtCorto(act)}</div>
+                        {act > 0 && <Delta act={act} ant={ant} />}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr style={{ borderTop: "2px solid #E8C4B0", background: "#FFF8F5" }}>
+              <td style={{ ...td, textAlign: "left", fontWeight: 700 }}>Total</td>
+              <td style={{ ...td, fontWeight: 700 }}>{fmtCorto(totAct)}</td>
+              {vendedoras.map(v => {
+                const suma = meses.reduce((s, m) => s + valorVend(m.key, v), 0);
+                return <td key={v.id} style={{ ...td, fontWeight: 700, color: v.color }}>{fmtCorto(suma)}</td>;
+              })}
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <p style={{ fontSize: 10, color: "#7A5848", textAlign: "center" }}>
+        Los montos se muestran abreviados (k = mil, M = millón). El mes actual está resaltado.
+      </p>
     </div>
   );
 }
