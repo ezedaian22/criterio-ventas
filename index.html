@@ -559,7 +559,7 @@ function App({ onLogout }) {
         </div>
       </div>
 
-      <div style={{ maxWidth: 900, margin: "0 auto", padding: "24px 24px" }} className="fade-in">
+      <div style={{ maxWidth: tab === "resumen" ? 1400 : 900, margin: "0 auto", padding: "24px 24px" }} className="fade-in">
         {tab === "dashboard" && <Dashboard ventas={ventas} vendedoras={vendedoras} pagos={pagos} currentMes={currentMes} getComisionMes={getComisionMes} getPagadoMes={getPagadoMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "nueva" && <NuevaVenta vendedoras={vendedoras} clientes={clientes} addVenta={addVenta} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} />}
         {tab === "resumen" && <Resumen ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
@@ -580,12 +580,11 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
   const fmtCorto = (n) => {
     const v = Number(n || 0);
     if (v === 0) return "—";
-    if (Math.abs(v) >= 1000000) return "$" + (v / 1000000).toFixed(1).replace(".", ",") + "M";
-    if (Math.abs(v) >= 1000) return "$" + Math.round(v / 1000) + "k";
-    return "$" + Math.round(v);
+    if (Math.abs(v) >= 1000000) return (v / 1000000).toFixed(1).replace(".", ",") + "M";
+    if (Math.abs(v) >= 1000) return Math.round(v / 1000) + "k";
+    return String(Math.round(v));
   };
 
-  // Ultimos 12 meses, del mas viejo al mas nuevo
   const meses = (() => {
     const out = [];
     const d = new Date(); d.setDate(1);
@@ -595,13 +594,12 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
         key: `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}`,
         prev: `${t.getFullYear() - 1}-${String(t.getMonth() + 1).padStart(2, "0")}`,
         label: MESES[t.getMonth()],
-        anio: t.getFullYear(),
+        anio: String(t.getFullYear()).slice(2),
       });
     }
     return out;
   })();
 
-  // Totales por mes-clave, calculados una sola vez
   const porMes = (() => {
     const m = {};
     ventas.forEach(v => {
@@ -617,148 +615,166 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
     return m;
   })();
 
-  const datoMes = (k) => porMes[k] || { total: 0, ops: 0, porVend: {} };
-  const valorVend = (k, v) => {
-    const vendido = datoMes(k).porVend[v.id] || 0;
+  const dm = (k) => porMes[k] || { total: 0, ops: 0, porVend: {} };
+  const valVend = (k, v) => {
+    const vendido = dm(k).porVend[v.id] || 0;
     return verComision ? vendido * v.comision / 100 : vendido;
   };
+  const comisionMes = (k) => vendedoras.reduce((s, v) => s + (dm(k).porVend[v.id] || 0) * v.comision / 100, 0);
+  const pct = (a, b) => (!b ? null : Math.round(((a - b) / b) * 100));
 
-  const pct = (act, ant) => {
-    if (!ant) return null;
-    return Math.round(((act - ant) / ant) * 100);
-  };
+  const totAct = meses.reduce((s, m) => s + dm(m.key).total, 0);
+  const totAnt = meses.reduce((s, m) => s + dm(m.prev).total, 0);
+  const totOps = meses.reduce((s, m) => s + dm(m.key).ops, 0);
+  const totCom = meses.reduce((s, m) => s + comisionMes(m.key), 0);
+  const pctTot = pct(totAct, totAnt);
 
-  const totAct = meses.reduce((s, m) => s + datoMes(m.key).total, 0);
-  const totAnt = meses.reduce((s, m) => s + datoMes(m.prev).total, 0);
-  const totOps = meses.reduce((s, m) => s + datoMes(m.key).ops, 0);
+  const Celda = ({ act, ant, bold, color }) => (
+    <td style={{ padding: "6px 4px", textAlign: "center", whiteSpace: "nowrap",
+                 borderLeft: "1px solid #F4E6DE" }}>
+      <div style={{ fontSize: 13, fontWeight: bold ? 700 : 500,
+                    color: act > 0 ? (color || "#2C1A14") : "#C9B3A8" }}>
+        {fmtCorto(act)}
+      </div>
+      {comparar && act > 0 && (() => {
+        const p = pct(act, ant);
+        if (p === null) return <div style={{ fontSize: 9, color: "#C9B3A8" }}>·</div>;
+        return <div style={{ fontSize: 9, fontWeight: 600,
+                             color: p > 0 ? "#10B981" : p < 0 ? "#F87171" : "#9A7570" }}>
+          {p > 0 ? "+" : ""}{p}%
+        </div>;
+      })()}
+    </td>
+  );
 
-  const th = { fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.05em",
-               padding: "6px 8px", textAlign: "right", fontWeight: 600, whiteSpace: "nowrap" };
-  const td = { fontSize: 12, padding: "7px 8px", textAlign: "right", whiteSpace: "nowrap" };
+  const thMes = (m, i) => (
+    <th key={m.key} style={{ padding: "6px 4px", textAlign: "center", whiteSpace: "nowrap",
+                             borderLeft: "1px solid #F4E6DE",
+                             background: i === meses.length - 1 ? "#FFE4D6" : "transparent" }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#5A3828" }}>{m.label}</div>
+      <div style={{ fontSize: 9, color: "#9A7570" }}>{m.anio}</div>
+    </th>
+  );
 
-  const Delta = ({ act, ant }) => {
-    if (!comparar) return null;
-    const p = pct(act, ant);
-    if (p === null) return <span style={{ fontSize: 9, color: "#B8A49C" }}>s/d</span>;
-    const col = p > 0 ? "#10B981" : p < 0 ? "#F87171" : "#7A5848";
-    return <span style={{ fontSize: 9, color: col, fontWeight: 600 }}>{p > 0 ? "+" : ""}{p}%</span>;
-  };
+  const tdLabel = { padding: "6px 10px", textAlign: "left", whiteSpace: "nowrap",
+                    position: "sticky", left: 0, background: "#FFFDFB", zIndex: 1 };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
 
-      <div className="card">
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <div style={{ display: "flex", gap: 0, border: "1px solid #D4A090", borderRadius: 8, overflow: "hidden" }}>
+      {/* Barra compacta: totales + controles en una sola linea */}
+      <div className="card" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 18, padding: "12px 16px" }}>
+        <div>
+          <span style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em" }}>Vendido 12m </span>
+          <span style={{ fontSize: 17, fontWeight: 700, color: "#2C1A14" }}>{fmtPeso(totAct)}</span>
+          {comparar && pctTot !== null && (
+            <span style={{ fontSize: 12, fontWeight: 600, marginLeft: 6,
+                           color: pctTot >= 0 ? "#10B981" : "#F87171" }}>
+              {pctTot > 0 ? "+" : ""}{pctTot}%
+            </span>
+          )}
+        </div>
+        <div>
+          <span style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em" }}>Comisiones </span>
+          <span style={{ fontSize: 17, fontWeight: 700, color: "#A85D43" }}>{fmtPeso(totCom)}</span>
+        </div>
+        <div>
+          <span style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em" }}>Ops </span>
+          <span style={{ fontSize: 17, fontWeight: 700, color: "#2C1A14" }}>{totOps}</span>
+        </div>
+
+        <div style={{ display: "flex", gap: 6, marginLeft: "auto", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", border: "1px solid #D4A090", borderRadius: 7, overflow: "hidden" }}>
             <button onClick={() => setVerComision(true)}
               style={{ background: verComision ? "#A85D43" : "#FFF8F5", color: verComision ? "#fff" : "#5A3828",
-                       border: "none", padding: "6px 12px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-              Comisión
-            </button>
+                       border: "none", padding: "5px 11px", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>Comisión</button>
             <button onClick={() => setVerComision(false)}
               style={{ background: !verComision ? "#A85D43" : "#FFF8F5", color: !verComision ? "#fff" : "#5A3828",
-                       border: "none", padding: "6px 12px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-              Vendido
-            </button>
+                       border: "none", padding: "5px 11px", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>Vendido</button>
           </div>
           <button onClick={() => setComparar(v => !v)}
             style={{ background: comparar ? "#A85D43" : "#FFF8F5", color: comparar ? "#fff" : "#5A3828",
-                     border: "1px solid #D4A090", borderRadius: 8, padding: "6px 12px", fontSize: 12,
+                     border: "1px solid #D4A090", borderRadius: 7, padding: "5px 11px", fontSize: 11,
                      cursor: "pointer", fontFamily: "inherit" }}>
-            {comparar ? "✓ " : ""}vs año anterior
+            {comparar ? "✓ " : ""}vs año ant.
           </button>
         </div>
-        <p style={{ fontSize: 11, color: "#7A5848", marginTop: 8, marginBottom: 0 }}>
-          Últimos 12 meses · las columnas de cada vendedora muestran {verComision ? "su comisión" : "lo que vendió"}
-        </p>
       </div>
 
-      {/* Totales del período */}
-      <div className="grid2" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 }}>
-        <div className="card">
-          <p style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Vendido 12 meses</p>
-          <p style={{ fontSize: 20, fontWeight: 700, color: "#2C1A14", margin: 0 }}>{fmtPeso(totAct)}</p>
-          {comparar && totAnt > 0 && (
-            <p style={{ fontSize: 11, color: pct(totAct, totAnt) >= 0 ? "#10B981" : "#F87171", margin: "2px 0 0 0", fontWeight: 600 }}>
-              {pct(totAct, totAnt) > 0 ? "+" : ""}{pct(totAct, totAnt)}% vs {fmtPeso(totAnt)}
-            </p>
-          )}
-        </div>
-        <div className="card">
-          <p style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Operaciones</p>
-          <p style={{ fontSize: 20, fontWeight: 700, color: "#2C1A14", margin: 0 }}>{totOps}</p>
-        </div>
-        <div className="card">
-          <p style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Comisiones 12 meses</p>
-          <p style={{ fontSize: 20, fontWeight: 700, color: "#A85D43", margin: 0 }}>
-            {fmtPeso(meses.reduce((s, m) => s + vendedoras.reduce((s2, v) => s2 + (datoMes(m.key).porVend[v.id] || 0) * v.comision / 100, 0), 0))}
-          </p>
-        </div>
-      </div>
-
-      {/* Tabla mes a mes */}
+      {/* Tabla horizontal: meses en columnas */}
       <div className="card" style={{ padding: 0, overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 480 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
           <thead>
             <tr style={{ borderBottom: "2px solid #E8C4B0" }}>
-              <th style={{ ...th, textAlign: "left" }}>Mes</th>
-              <th style={th}>Vendido</th>
-              {vendedoras.map(v => (
-                <th key={v.id} style={{ ...th, color: v.color }}>
-                  {v.nombre}<br />
-                  <span style={{ fontSize: 8, opacity: 0.75 }}>{verComision ? `${v.comision}%` : "vendido"}</span>
-                </th>
-              ))}
+              <th style={{ ...tdLabel, fontSize: 10, color: "#7A5848", textTransform: "uppercase",
+                           letterSpacing: "0.06em", background: "#FFFDFB" }}></th>
+              {meses.map((m, i) => thMes(m, i))}
+              <th style={{ padding: "6px 8px", textAlign: "center", borderLeft: "2px solid #E8C4B0",
+                           fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em" }}>Total</th>
             </tr>
           </thead>
           <tbody>
-            {meses.map((m, i) => {
-              const d = datoMes(m.key);
-              const dPrev = datoMes(m.prev);
-              const esUltimo = i === meses.length - 1;
+            <tr style={{ borderBottom: "2px solid #E8C4B0", background: "#FFF8F5" }}>
+              <td style={{ ...tdLabel, background: "#FFF8F5", fontSize: 12, fontWeight: 700, color: "#2C1A14" }}>Vendido</td>
+              {meses.map(m => <Celda key={m.key} act={dm(m.key).total} ant={dm(m.prev).total} bold />)}
+              <td style={{ padding: "6px 8px", textAlign: "center", borderLeft: "2px solid #E8C4B0",
+                           fontSize: 13, fontWeight: 700 }}>{fmtCorto(totAct)}</td>
+            </tr>
+
+            <tr style={{ borderBottom: "1px solid #F0E0D8" }}>
+              <td style={{ ...tdLabel, fontSize: 11, color: "#7A5848" }}>Operaciones</td>
+              {meses.map(m => (
+                <td key={m.key} style={{ padding: "5px 4px", textAlign: "center", borderLeft: "1px solid #F4E6DE",
+                                         fontSize: 11, color: dm(m.key).ops > 0 ? "#7A5848" : "#C9B3A8" }}>
+                  {dm(m.key).ops || "—"}
+                </td>
+              ))}
+              <td style={{ padding: "5px 8px", textAlign: "center", borderLeft: "2px solid #E8C4B0",
+                           fontSize: 11, color: "#7A5848" }}>{totOps}</td>
+            </tr>
+
+            {vendedoras.map(v => {
+              const suma = meses.reduce((s, m) => s + valVend(m.key, v), 0);
               return (
-                <tr key={m.key} style={{ borderBottom: "1px solid #F0E0D8",
-                                         background: esUltimo ? "#FFF0E8" : "transparent" }}>
-                  <td style={{ ...td, textAlign: "left" }}>
-                    <span style={{ fontWeight: esUltimo ? 700 : 500 }}>{m.label}</span>
-                    <span style={{ fontSize: 10, color: "#9A7570" }}> {String(m.anio).slice(2)}</span>
-                    {d.ops > 0 && <span style={{ fontSize: 9, color: "#B8A49C" }}> · {d.ops}</span>}
+                <tr key={v.id} style={{ borderBottom: "1px solid #F0E0D8" }}>
+                  <td style={tdLabel}>
+                    <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+                                   background: v.color, marginRight: 6 }} />
+                    <span style={{ fontSize: 12, fontWeight: 600 }}>{v.nombre}</span>
+                    <span style={{ fontSize: 9, color: "#9A7570" }}> {v.comision}%</span>
                   </td>
-                  <td style={td}>
-                    <div style={{ fontWeight: 600 }}>{fmtCorto(d.total)}</div>
-                    <Delta act={d.total} ant={dPrev.total} />
-                  </td>
-                  {vendedoras.map(v => {
-                    const act = valorVend(m.key, v);
+                  {meses.map(m => {
                     const ant = verComision
-                      ? (dPrev.porVend[v.id] || 0) * v.comision / 100
-                      : (dPrev.porVend[v.id] || 0);
-                    return (
-                      <td key={v.id} style={td}>
-                        <div style={{ color: act > 0 ? "#2C1A14" : "#C4A090" }}>{fmtCorto(act)}</div>
-                        {act > 0 && <Delta act={act} ant={ant} />}
-                      </td>
-                    );
+                      ? (dm(m.prev).porVend[v.id] || 0) * v.comision / 100
+                      : (dm(m.prev).porVend[v.id] || 0);
+                    return <Celda key={m.key} act={valVend(m.key, v)} ant={ant} color={v.color} />;
                   })}
+                  <td style={{ padding: "6px 8px", textAlign: "center", borderLeft: "2px solid #E8C4B0",
+                               fontSize: 13, fontWeight: 700, color: v.color }}>{fmtCorto(suma)}</td>
                 </tr>
               );
             })}
-          </tbody>
-          <tfoot>
-            <tr style={{ borderTop: "2px solid #E8C4B0", background: "#FFF8F5" }}>
-              <td style={{ ...td, textAlign: "left", fontWeight: 700 }}>Total</td>
-              <td style={{ ...td, fontWeight: 700 }}>{fmtCorto(totAct)}</td>
-              {vendedoras.map(v => {
-                const suma = meses.reduce((s, m) => s + valorVend(m.key, v), 0);
-                return <td key={v.id} style={{ ...td, fontWeight: 700, color: v.color }}>{fmtCorto(suma)}</td>;
+
+            <tr style={{ borderTop: "2px solid #E8C4B0", background: "#FFF0E8" }}>
+              <td style={{ ...tdLabel, background: "#FFF0E8", fontSize: 12, fontWeight: 700, color: "#A85D43" }}>
+                {verComision ? "Comisiones" : "Suma vendedoras"}
+              </td>
+              {meses.map(m => {
+                const act = verComision ? comisionMes(m.key) : vendedoras.reduce((s, v) => s + (dm(m.key).porVend[v.id] || 0), 0);
+                const ant = verComision ? comisionMes(m.prev) : vendedoras.reduce((s, v) => s + (dm(m.prev).porVend[v.id] || 0), 0);
+                return <Celda key={m.key} act={act} ant={ant} bold color="#A85D43" />;
               })}
+              <td style={{ padding: "6px 8px", textAlign: "center", borderLeft: "2px solid #E8C4B0",
+                           fontSize: 13, fontWeight: 700, color: "#A85D43" }}>
+                {fmtCorto(verComision ? totCom : meses.reduce((s, m) => s + vendedoras.reduce((s2, v) => s2 + (dm(m.key).porVend[v.id] || 0), 0), 0))}
+              </td>
             </tr>
-          </tfoot>
+          </tbody>
         </table>
       </div>
 
-      <p style={{ fontSize: 10, color: "#7A5848", textAlign: "center" }}>
-        Los montos se muestran abreviados (k = mil, M = millón). El mes actual está resaltado.
+      <p style={{ fontSize: 10, color: "#7A5848", textAlign: "center", margin: 0 }}>
+        Montos en miles (k) y millones (M) · el mes actual está resaltado · el % compara contra el mismo mes del año anterior
       </p>
     </div>
   );
