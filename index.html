@@ -595,15 +595,23 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
       if (!k) return;
       const vend = vendedoras.find(x => x.id === (v.vendedora_id || v.vendedoraId));
       const monto = Number(v.total || 0);
-      if (!m[k]) m[k] = { total: 0, comision: 0, ops: 0 };
+      if (!m[k]) m[k] = { total: 0, comision: 0, ops: 0, ganancia: 0, costo: 0, conCosto: 0 };
       m[k].total += monto;
       m[k].ops += 1;
       m[k].comision += vend ? monto * vend.comision / 100 : 0;
+      // La ganancia necesita el costo guardado por venta (columna `costo_total` en ventas).
+      // Mientras no exista, queda en 0 y la fila se muestra vacia.
+      const costo = Number(v.costo_total || 0);
+      if (costo > 0) {
+        m[k].costo += costo;
+        m[k].conCosto += 1;
+        m[k].ganancia += monto - costo;
+      }
     });
     return m;
   })();
 
-  const dm = (a, i) => porMes[`${a}-${String(i + 1).padStart(2, "0")}`] || { total: 0, comision: 0, ops: 0 };
+  const dm = (a, i) => porMes[`${a}-${String(i + 1).padStart(2, "0")}`] || { total: 0, comision: 0, ops: 0, ganancia: 0, costo: 0, conCosto: 0 };
   const sumaAnio = (a, campo) => MESES.reduce((s, _, i) => s + dm(a, i)[campo], 0);
   const pct = (a, b) => (!b ? null : Math.round(((a - b) / b) * 100));
 
@@ -611,6 +619,8 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
   const totVA = sumaAnio(anio, "total"), totVB = sumaAnio(anioAnt, "total");
   const totCA = sumaAnio(anio, "comision"), totCB = sumaAnio(anioAnt, "comision");
   const totOpsA = sumaAnio(anio, "ops"), totOpsB = sumaAnio(anioAnt, "ops");
+  const totGA = sumaAnio(anio, "ganancia"), totGB = sumaAnio(anioAnt, "ganancia");
+  const ventasConCosto = MESES.reduce((s, _, i) => s + dm(anio, i).conCosto + dm(anioAnt, i).conCosto, 0);
   const pctV = pct(totVA, totVB);
 
   const esFuturo = (a, i) => a === anioHoy && i > mesHoy;
@@ -648,6 +658,12 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
         <div>
           <span style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em" }}>Comisiones </span>
           <span style={{ fontSize: 18, fontWeight: 700, color: "#A85D43" }}>{fmtPeso(totCA)}</span>
+        </div>
+        <div>
+          <span style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em" }}>Ganancia </span>
+          <span style={{ fontSize: 18, fontWeight: 700, color: totGA ? "#10B981" : "#C9B3A8" }}>
+            {totGA ? fmtPeso(totGA) : "sin datos"}
+          </span>
         </div>
 
         <div style={{ display: "flex", gap: 6, marginLeft: "auto", alignItems: "center", flexWrap: "wrap" }}>
@@ -690,7 +706,7 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
             </tr>
           </thead>
           <tbody>
-            {/* Año actual */}
+            {/* Ventas: los dos años juntos */}
             <tr style={{ background: "#FFF8F5" }}>
               <td style={{ ...tdLabel, background: "#FFF8F5", fontSize: 13, fontWeight: 700, color: "#2C1A14" }}>
                 Ventas <span style={{ color: "#9A7570", fontWeight: 500 }}>{anio}</span>
@@ -698,28 +714,44 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
               {MESES.map((_, i) => celda(dm(anio, i).total, esFuturo(anio, i)))}
               <td style={tdTotal}>{fmtCorto(totVA) || "—"}</td>
             </tr>
-            <tr style={{ borderBottom: "2px solid #E8C4B0", background: "#FFF8F5" }}>
-              <td style={{ ...tdLabel, background: "#FFF8F5", fontSize: 13, fontWeight: 600, color: "#A85D43" }}>
-                Comisión <span style={{ color: "#9A7570", fontWeight: 500 }}>{anio}</span>
-              </td>
-              {MESES.map((_, i) => celda(dm(anio, i).comision, esFuturo(anio, i), { color: "#A85D43" }))}
-              <td style={{ ...tdTotal, color: "#A85D43" }}>{fmtCorto(totCA) || "—"}</td>
-            </tr>
-
-            {/* Año anterior */}
-            <tr>
-              <td style={{ ...tdLabel, background: "#FFFDFB", fontSize: 13, fontWeight: 700, color: "#7A5848" }}>
+            <tr style={{ borderBottom: "2px solid #E8C4B0" }}>
+              <td style={{ ...tdLabel, background: "#FFFDFB", fontSize: 13, fontWeight: 600, color: "#7A5848" }}>
                 Ventas <span style={{ color: "#9A7570", fontWeight: 500 }}>{anioAnt}</span>
               </td>
               {MESES.map((_, i) => celda(dm(anioAnt, i).total, false, { color: "#7A5848" }))}
               <td style={{ ...tdTotal, color: "#7A5848" }}>{fmtCorto(totVB) || "—"}</td>
             </tr>
-            <tr style={{ borderBottom: verPct ? "2px solid #E8C4B0" : "none" }}>
+
+            {/* Comisión: los dos años juntos */}
+            <tr style={{ background: "#FFF8F5" }}>
+              <td style={{ ...tdLabel, background: "#FFF8F5", fontSize: 13, fontWeight: 700, color: "#A85D43" }}>
+                Comisión <span style={{ color: "#9A7570", fontWeight: 500 }}>{anio}</span>
+              </td>
+              {MESES.map((_, i) => celda(dm(anio, i).comision, esFuturo(anio, i), { color: "#A85D43" }))}
+              <td style={{ ...tdTotal, color: "#A85D43" }}>{fmtCorto(totCA) || "—"}</td>
+            </tr>
+            <tr style={{ borderBottom: "2px solid #E8C4B0" }}>
               <td style={{ ...tdLabel, background: "#FFFDFB", fontSize: 13, fontWeight: 600, color: "#B89080" }}>
                 Comisión <span style={{ color: "#9A7570", fontWeight: 500 }}>{anioAnt}</span>
               </td>
               {MESES.map((_, i) => celda(dm(anioAnt, i).comision, false, { color: "#B89080" }))}
               <td style={{ ...tdTotal, color: "#B89080" }}>{fmtCorto(totCB) || "—"}</td>
+            </tr>
+
+            {/* Ganancia: los dos años juntos — sin datos hasta que se guarde el costo por venta */}
+            <tr style={{ background: "#FFF8F5" }}>
+              <td style={{ ...tdLabel, background: "#FFF8F5", fontSize: 13, fontWeight: 700, color: "#10B981" }}>
+                Ganancia <span style={{ color: "#9A7570", fontWeight: 500 }}>{anio}</span>
+              </td>
+              {MESES.map((_, i) => celda(dm(anio, i).ganancia, esFuturo(anio, i), { color: "#10B981" }))}
+              <td style={{ ...tdTotal, color: "#10B981" }}>{fmtCorto(totGA) || "—"}</td>
+            </tr>
+            <tr style={{ borderBottom: "2px solid #E8C4B0" }}>
+              <td style={{ ...tdLabel, background: "#FFFDFB", fontSize: 13, fontWeight: 600, color: "#7FBFA0" }}>
+                Ganancia <span style={{ color: "#9A7570", fontWeight: 500 }}>{anioAnt}</span>
+              </td>
+              {MESES.map((_, i) => celda(dm(anioAnt, i).ganancia, false, { color: "#7FBFA0" }))}
+              <td style={{ ...tdTotal, color: "#7FBFA0" }}>{fmtCorto(totGB) || "—"}</td>
             </tr>
 
             {/* Variación */}
@@ -771,6 +803,18 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
           </tbody>
         </table>
       </div>
+
+      {ventasConCosto === 0 && (
+        <div style={{ background: "#FFF4E6", border: "1px solid #E8C4B0", borderRadius: 8, padding: "10px 14px" }}>
+          <p style={{ fontSize: 12, color: "#8A5A2B", margin: 0, fontWeight: 600 }}>
+            La fila de Ganancia está vacía porque todavía no se guarda el costo de cada venta
+          </p>
+          <p style={{ fontSize: 11, color: "#7A5848", margin: "4px 0 0 0" }}>
+            El matching de artículos ya calcula el costo en la pantalla de revisión, pero no queda grabado.
+            Cuando se guarde, la ganancia se llena sola de ahí en adelante.
+          </p>
+        </div>
+      )}
 
       <p style={{ fontSize: 10, color: "#7A5848", textAlign: "center", margin: 0 }}>
         Montos en miles (k) y millones (M) · los meses que todavía no llegaron quedan vacíos
