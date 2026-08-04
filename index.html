@@ -223,6 +223,34 @@ function matchearArticulo(codigoLeido, descLeida, catalogo, aliases = {}) {
   return { ...base, estado: "sin_match", score: mejorScore, candidatos: top3 };
 }
 
+// Arma el costo de una venta y las filas a guardar en venta_items.
+// costoTotal queda en null si algun renglon no se pudo costear, para no inflar la ganancia.
+function costearVenta(extracted, catalogo, aliases) {
+  const items = (extracted && extracted.items) || [];
+  if (!items.length || !catalogo || !catalogo.length) {
+    return { costoTotal: null, completo: false, filas: [], sinCostear: items.length };
+  }
+  let acum = 0, sinCostear = 0;
+  const filas = items.map(it => {
+    const m = matchearArticulo(it.codigo, it.descripcion, catalogo, aliases || {});
+    const cant = Number(it.cantidad || 1);
+    const costoUnit = m.costo_total !== null && m.costo_total !== undefined ? Number(m.costo_total) : null;
+    if (costoUnit === null) sinCostear++;
+    else acum += costoUnit * cant;
+    return {
+      articulo_codigo: m.codigo || null,
+      descripcion_leida: it.descripcion || null,
+      cantidad: cant,
+      precio_unitario: Number(it.precio || 0) || null,
+      total_item: Number(it.total || 0) || null,
+      costo_unitario: costoUnit,
+      estado_match: m.estado,
+    };
+  });
+  const completo = sinCostear === 0;
+  return { costoTotal: completo ? acum : null, completo, filas, sinCostear };
+}
+
 // Catalogo completo: articulos (codigo + descripcion) cruzado con costo_articulo (costo_total)
 async function armarCatalogoCompleto() {
   const { data: arts, error: e1 } = await sbCostos.from("articulos").select("*").limit(5000);
@@ -443,10 +471,20 @@ function App({ onLogout }) {
   }, []);
 
   const addVenta = async (venta) => {
-    const { vendedoraId, ...rest } = venta;
+    const { vendedoraId, _itemsCosto, ...rest } = venta;
     const row = { ...rest, vendedora_id: vendedoraId, fecha: venta.fecha || new Date().toISOString().split("T")[0] };
     const saved = await dbInsert("ventas", row);
     if (saved) setVentas(v => [saved, ...v]);
+
+    // Detalle por articulo, para poder auditar el costo despues.
+    // Si la tabla no existe todavia, la venta igual queda guardada.
+    if (saved && _itemsCosto && _itemsCosto.length) {
+      try {
+        const filas = _itemsCosto.map(f => ({ ...f, venta_id: saved.id }));
+        const { error } = await sb.from("venta_items").insert(filas);
+        if (error) console.warn("venta_items no guardado:", error.message);
+      } catch (e) { console.warn("venta_items no guardado", e); }
+    }
     if (venta.cliente && venta.vendedoraId) {
       const clienteKey = venta.cliente.toLowerCase().trim();
       await sb.from("clientes").upsert([{ nombre: clienteKey, vendedora_id: venta.vendedoraId }], { onConflict: "nombre" });
@@ -1226,6 +1264,13 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias }
               ⚠ Margen incompleto: {sinMatch > 0 ? `${sinMatch} sin identificar` : ""}{sinMatch > 0 && sinCosto > 0 ? " · " : ""}{sinCosto > 0 ? `${sinCosto} sin costo cargado` : ""}
             </p>
           )}
+          {sinCosto === 0 && sinMatch === 0
+            ? <p style={{ fontSize: 10, color: "#10B981", margin: "4px 0 0 0", fontWeight: 600 }}>
+                ✓ Al guardar queda con el costo completo — suma a la ganancia
+              </p>
+            : <p style={{ fontSize: 10, color: "#8A5A2B", margin: "4px 0 0 0", fontWeight: 600 }}>
+                Si guardás así, la venta queda SIN costo y no suma a la ganancia. Resolvé los ⚠ para que cuente.
+              </p>}
         </div>
       )}
 
@@ -1358,7 +1403,14 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
   const saveItem = (idx) => {
     const item = queue[idx];
     if (!item.form.vendedoraId || !item.form.total) return;
-    addVenta({ ...item.form, vendedoraId: Number(item.form.vendedoraId), total: Number(item.form.total) });
+    const cost = costearVenta(item.extracted, catalogo, aliases);
+    addVenta({
+      ...item.form,
+      vendedoraId: Number(item.form.vendedoraId),
+      total: Number(item.form.total),
+      costo_total: cost.costoTotal,
+      _itemsCosto: cost.filas,
+    });
     setQueue(q => {
       const next = q.filter((_, i) => i !== idx);
       setActiveIdx(next.length > 0 ? 0 : null);
