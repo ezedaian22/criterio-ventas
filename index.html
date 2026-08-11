@@ -409,8 +409,9 @@ function getMonthKey(date) {
   return String(date).substring(0, 7);
 }
 
-function App({ onLogout }) {
-  const [tab, setTab] = useState("dashboard");
+function App({ onLogout, rol }) {
+  const esDeposito = rol === "deposito";
+  const [tab, setTab] = useState(esDeposito ? "clientes" : "dashboard");
   const [loading, setLoading] = useState(true);
   const [ventas, setVentas] = useState([]);
   const [vendedoras, setVendedoras] = useState(INITIAL_VENDEDORAS);
@@ -590,7 +591,10 @@ function App({ onLogout }) {
             </div>
           </div>
           <div style={{ display: "flex", gap: 0, marginTop: 8, overflowX: "auto", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
-            {[["dashboard","Dashboard"],["nueva","Nueva Venta"],["resumen","Resumen"],["comisiones","Comisiones"],["historial","Historial"],["comparar","Comparar"],["config","Config"]].map(([k,l]) => (
+            {(esDeposito
+              ? [["clientes","Clientes"]]
+              : [["dashboard","Dashboard"],["nueva","Nueva Venta"],["resumen","Resumen"],["comisiones","Comisiones"],["historial","Historial"],["clientes","Clientes"],["comparar","Comparar"],["config","Config"]]
+             ).map(([k,l]) => (
               <button key={k} className={`tab-btn ${tab===k?"active":""}`} onClick={() => setTab(k)}>{l}</button>
             ))}
           </div>
@@ -598,13 +602,251 @@ function App({ onLogout }) {
       </div>
 
       <div style={{ maxWidth: tab === "resumen" ? 1400 : 900, margin: "0 auto", padding: "24px 24px" }} className="fade-in">
-        {tab === "dashboard" && <Dashboard ventas={ventas} vendedoras={vendedoras} pagos={pagos} currentMes={currentMes} getComisionMes={getComisionMes} getPagadoMes={getPagadoMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
-        {tab === "nueva" && <NuevaVenta vendedoras={vendedoras} clientes={clientes} addVenta={addVenta} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} />}
-        {tab === "resumen" && <Resumen ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
-        {tab === "comisiones" && <Comisiones ventas={ventas} vendedoras={vendedoras} pagos={pagos} addPago={addPago} marcarVentasPagadas={marcarVentasPagadas} currentMes={currentMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
-        {tab === "historial" && <Historial ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
-        {tab === "comparar" && <Comparar ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
-        {tab === "config" && <Config vendedoras={vendedoras} setVendedoras={setVendedoras} clientes={clientes} setClientes={setClientes} ventas={ventas} setVentas={setVentas} setPagos={setPagos} pagos={pagos} catalogo={catalogo} aliases={aliases} />}
+        {!esDeposito && tab === "dashboard" && <Dashboard ventas={ventas} vendedoras={vendedoras} pagos={pagos} currentMes={currentMes} getComisionMes={getComisionMes} getPagadoMes={getPagadoMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
+        {!esDeposito && tab === "nueva" && <NuevaVenta vendedoras={vendedoras} clientes={clientes} addVenta={addVenta} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} />}
+        {!esDeposito && tab === "resumen" && <Resumen ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
+        {!esDeposito && tab === "comisiones" && <Comisiones ventas={ventas} vendedoras={vendedoras} pagos={pagos} addPago={addPago} marcarVentasPagadas={marcarVentasPagadas} currentMes={currentMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
+        {!esDeposito && tab === "historial" && <Historial ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
+        {!esDeposito && tab === "comparar" && <Comparar ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
+        {tab === "clientes" && <Clientes vendedoras={vendedoras} esDeposito={esDeposito} />}
+        {!esDeposito && tab === "config" && <Config vendedoras={vendedoras} setVendedoras={setVendedoras} clientes={clientes} setClientes={setClientes} ventas={ventas} setVentas={setVentas} setPagos={setPagos} pagos={pagos} catalogo={catalogo} aliases={aliases} />}
+      </div>
+    </div>
+  );
+}
+
+// ─── CLIENTES ────────────────────────────────────────────────────────────────
+// Parser por reglas: los renglones etiquetados salen solos, el resto es direccion.
+// No usa IA a proposito — el nombre lo tipea la persona y el original queda guardado.
+function parsearFichaCliente(texto) {
+  const lineas = String(texto || "").split("\n").map(l => l.trim()).filter(Boolean);
+  const out = { direccion: [], barrio: "", localidad: "", provincia: "", dni: "", transporte: "", telefono: "" };
+
+  const limpiar = (l) => l.replace(/^[^:]*[:.]\s*/, "").trim();
+
+  lineas.forEach(l => {
+    const bajo = l.toLowerCase();
+    if (/\bdni\b|documento/.test(bajo)) {
+      const n = l.match(/\d[\d.\s-]{6,}/);
+      out.dni = n ? n[0].replace(/[.\s-]/g, "") : limpiar(l);
+    } else if (/transporte|expreso|flete/.test(bajo)) {
+      out.transporte = limpiar(l) || l;
+    } else if (/celular|tel[eé]fono|\btel\b|\bcel\b|whats/.test(bajo)) {
+      const n = l.match(/[+\d][\d\s()-]{7,}/);
+      out.telefono = n ? n[0].trim() : limpiar(l);
+    } else if (/^prov\b|provincia/.test(bajo)) {
+      out.provincia = limpiar(l) || l.replace(/^prov\.?\s*/i, "").trim();
+    } else if (/^barrio\b/.test(bajo)) {
+      out.barrio = l.replace(/^barrio\s*/i, "").trim();
+    } else if (/^[+\d][\d\s()+-]{8,}$/.test(l)) {
+      if (!out.telefono) out.telefono = l;
+    } else {
+      out.direccion.push(l);
+    }
+  });
+
+  // De los renglones sueltos, el ultimo suele ser la localidad
+  if (out.direccion.length > 1 && !out.localidad) {
+    out.localidad = out.direccion[out.direccion.length - 1];
+    out.direccion = out.direccion.slice(0, -1);
+  }
+  return { ...out, direccion: out.direccion.join(", ") };
+}
+
+function Clientes({ vendedoras, esDeposito }) {
+  const [lista, setLista] = useState([]);
+  const [cargando, setCargando] = useState(true);
+  const [busca, setBusca] = useState("");
+  const [nuevo, setNuevo] = useState(false);
+  const [nombreReal, setNombreReal] = useState("");
+  const [pegado, setPegado] = useState("");
+  const [campos, setCampos] = useState(null);
+  const [guardando, setGuardando] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [editId, setEditId] = useState(null);
+
+  const cargar = async () => {
+    setCargando(true);
+    const { data, error } = await sb.from("clientes").select("*").order("nombre");
+    if (!error && data) setLista(data);
+    setCargando(false);
+  };
+  useEffect(() => { cargar(); }, []);
+
+  useEffect(() => {
+    if (pegado.trim()) setCampos(parsearFichaCliente(pegado));
+  }, [pegado]);
+
+  const limpiarForm = () => {
+    setNuevo(false); setNombreReal(""); setPegado(""); setCampos(null); setEditId(null);
+  };
+
+  const guardar = async () => {
+    const real = nombreReal.trim();
+    if (!real) { setMsg({ tipo: "error", txt: "Falta el nombre del cliente" }); return; }
+    setGuardando(true);
+    const fila = {
+      nombre: real.toLowerCase(),
+      nombre_real: real,
+      direccion: campos?.direccion || null,
+      barrio: campos?.barrio || null,
+      localidad: campos?.localidad || null,
+      provincia: campos?.provincia || null,
+      dni: campos?.dni || null,
+      transporte: campos?.transporte || null,
+      telefono: campos?.telefono || null,
+      texto_original: pegado || null,
+    };
+    const { error } = await sb.from("clientes").upsert([fila], { onConflict: "nombre" });
+    setGuardando(false);
+    if (error) { setMsg({ tipo: "error", txt: error.message }); return; }
+    setMsg({ tipo: "ok", txt: `${real} guardado` });
+    setTimeout(() => setMsg(null), 2500);
+    limpiarForm();
+    cargar();
+  };
+
+  const editar = (cl) => {
+    setNuevo(true);
+    setEditId(cl.id);
+    setNombreReal(cl.nombre_real || cl.nombre || "");
+    setPegado(cl.texto_original || "");
+    setCampos({
+      direccion: cl.direccion || "", barrio: cl.barrio || "", localidad: cl.localidad || "",
+      provincia: cl.provincia || "", dni: cl.dni || "", transporte: cl.transporte || "",
+      telefono: cl.telefono || "",
+    });
+  };
+
+  const q = busca.toLowerCase().trim();
+  const filtrados = !q ? lista : lista.filter(cl =>
+    [cl.nombre_real, cl.nombre, cl.localidad, cl.transporte, cl.telefono, cl.provincia]
+      .some(v => String(v || "").toLowerCase().includes(q)));
+
+  const conFicha = lista.filter(cl => cl.direccion || cl.transporte || cl.telefono).length;
+
+  const campo = (k, label) => (
+    <div style={{ marginBottom: 6 }}>
+      <label style={{ fontSize: 10, color: "#7A5848", display: "block", marginBottom: 2 }}>{label}</label>
+      <input className="input" value={campos?.[k] || ""} style={{ width: "100%", fontSize: 13 }}
+        onChange={e => setCampos(c => ({ ...(c || {}), [k]: e.target.value }))} />
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+      {msg && (
+        <div style={{ background: msg.tipo === "ok" ? "#E6F7EF" : "#FFE8E4", borderRadius: 8, padding: "8px 12px" }}>
+          <p style={{ fontSize: 12, margin: 0, color: msg.tipo === "ok" ? "#0B7A55" : "#B3261E", fontWeight: 600 }}>
+            {msg.tipo === "ok" ? "✓ " : "✕ "}{msg.txt}
+          </p>
+        </div>
+      )}
+
+      {/* Alta / edicion */}
+      {!nuevo ? (
+        <button className="btn btn-primary btn-sm" onClick={() => setNuevo(true)} style={{ alignSelf: "flex-start" }}>
+          + Cargar cliente
+        </button>
+      ) : (
+        <div className="card">
+          <p style={{ fontSize: 11, color: "#6B4A3E", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 10 }}>
+            {editId ? "Editar cliente" : "Cliente nuevo"}
+          </p>
+
+          <label style={{ fontSize: 12, color: "#5A3828", display: "block", marginBottom: 4 }}>
+            Nombre real del cliente
+          </label>
+          <input className="input" value={nombreReal} onChange={e => setNombreReal(e.target.value)}
+            placeholder="Ej: Marcela Carnevale" autoFocus
+            style={{ width: "100%", marginBottom: 12, fontSize: 14 }} />
+
+          <label style={{ fontSize: 12, color: "#5A3828", display: "block", marginBottom: 4 }}>
+            Pegá acá el mensaje de WhatsApp
+          </label>
+          <textarea className="input" value={pegado} onChange={e => setPegado(e.target.value)} rows={7}
+            placeholder={"Majagua a4076\nBarrio lagos del Leyes.\nArroyo Leyes 3001\nProv.Santa Fe\nDNI 23860821\nTransporte Pedrito\nCelular +54 9 3425 34-2616"}
+            style={{ width: "100%", resize: "vertical", fontSize: 13, marginBottom: 12, fontFamily: "inherit" }} />
+
+          {campos && (
+            <div style={{ background: "#FFF8F5", borderRadius: 8, padding: 12, marginBottom: 12 }}>
+              <p style={{ fontSize: 11, color: "#7A5848", marginBottom: 8 }}>
+                Esto entendió — corregí lo que haga falta:
+              </p>
+              {campo("direccion", "Dirección")}
+              {campo("barrio", "Barrio")}
+              {campo("localidad", "Localidad")}
+              {campo("provincia", "Provincia")}
+              {campo("transporte", "Transporte")}
+              {campo("telefono", "Teléfono")}
+              {campo("dni", "DNI")}
+              <p style={{ fontSize: 10, color: "#9A7570", margin: "6px 0 0 0" }}>
+                El mensaje original se guarda entero igual, por las dudas.
+              </p>
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn-primary btn-sm" onClick={guardar} disabled={guardando} style={{ flex: 1 }}>
+              {guardando ? "Guardando..." : "Guardar cliente"}
+            </button>
+            <button onClick={limpiarForm}
+              style={{ background: "#FFF8F5", border: "1px solid #C4A090", borderRadius: 8, color: "#5A3828",
+                       padding: "6px 14px", cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      {/* Buscador */}
+      <div className="card">
+        <input className="input" value={busca} onChange={e => setBusca(e.target.value)}
+          placeholder="Buscar por nombre, localidad, transporte o teléfono..."
+          style={{ width: "100%", fontSize: 14 }} />
+        <p style={{ fontSize: 11, color: "#7A5848", marginTop: 8, marginBottom: 0 }}>
+          {cargando ? "Cargando..." : `${lista.length} clientes · ${conFicha} con ficha cargada`}
+          {q && ` · ${filtrados.length} coinciden`}
+        </p>
+      </div>
+
+      {/* Listado */}
+      <div className="card" style={{ padding: 0 }}>
+        {filtrados.length === 0 && !cargando && (
+          <p style={{ fontSize: 12, color: "#7A5848", padding: 16, margin: 0 }}>
+            {q ? "Sin resultados" : "Todavía no hay clientes cargados"}
+          </p>
+        )}
+        {filtrados.map(cl => {
+          const vend = vendedoras.find(v => v.id === cl.vendedora_id);
+          const tieneFicha = cl.direccion || cl.transporte || cl.telefono;
+          return (
+            <div key={cl.id || cl.nombre} style={{ padding: "10px 14px", borderBottom: "1px solid #F0E0D8" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>
+                    {cl.nombre_real || cl.nombre}
+                    {!tieneFicha && <span style={{ fontSize: 10, color: "#C9A090", fontWeight: 500 }}> · sin ficha</span>}
+                  </p>
+                  {tieneFicha && (
+                    <p style={{ fontSize: 11, color: "#6B4A3E", margin: "2px 0 0 0" }}>
+                      {[cl.direccion, cl.localidad, cl.provincia].filter(Boolean).join(" · ")}
+                    </p>
+                  )}
+                  <p style={{ fontSize: 11, color: "#7A5848", margin: "2px 0 0 0" }}>
+                    {cl.transporte && <span>🚚 {cl.transporte}  </span>}
+                    {cl.telefono && <span>📞 {cl.telefono}</span>}
+                  </p>
+                  {vend && <p style={{ fontSize: 10, color: vend.color, margin: "2px 0 0 0" }}>{vend.nombre}</p>}
+                </div>
+                <button onClick={() => editar(cl)}
+                  style={{ background: "#FFF8F5", border: "1px solid #D4A090", borderRadius: 6, color: "#5A3828",
+                           padding: "4px 10px", cursor: "pointer", fontSize: 11, fontFamily: "inherit", flexShrink: 0 }}>
+                  {tieneFicha ? "Editar" : "Cargar"}
+                </button>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -2659,10 +2901,14 @@ function LoginScreen({ onLogin }) {
   const [error, setError] = React.useState(false);
 
   const handleLogin = () => {
-    if (user.toLowerCase() === "criterio" && pass.toLowerCase() === "comida") {
+    const u = user.toLowerCase().trim(), p = pass.toLowerCase().trim();
+    const rol = (u === "criterio" && p === "comida") ? "gerencia"
+              : ((u === "deposito" || u === "depósito") && p === "criterio") ? "deposito"
+              : null;
+    if (rol) {
       if (remember) { localStorage.setItem("cv_remembered_user", user); }
       else { localStorage.removeItem("cv_remembered_user"); }
-      onLogin();
+      onLogin(rol);
     } else {
       setError(true);
       setTimeout(() => setError(false), 2000);
@@ -2695,11 +2941,11 @@ function LoginScreen({ onLogin }) {
 }
 
 function Root() {
-  const [logged, setLogged] = React.useState(() => sessionStorage.getItem("cv_logged") === "1");
-  const handleLogin = () => { sessionStorage.setItem("cv_logged", "1"); setLogged(true); };
-  const handleLogout = () => { sessionStorage.removeItem("cv_logged"); setLogged(false); };
-  if (!logged) return React.createElement(LoginScreen, { onLogin: handleLogin });
-  return React.createElement(App, { onLogout: handleLogout });
+  const [rol, setRol] = React.useState(() => sessionStorage.getItem("cv_rol") || null);
+  const handleLogin = (r) => { sessionStorage.setItem("cv_rol", r); setRol(r); };
+  const handleLogout = () => { sessionStorage.removeItem("cv_rol"); sessionStorage.removeItem("cv_logged"); setRol(null); };
+  if (!rol) return React.createElement(LoginScreen, { onLogin: handleLogin });
+  return React.createElement(App, { onLogout: handleLogout, rol });
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(Root));
