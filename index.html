@@ -616,42 +616,8 @@ function App({ onLogout, rol }) {
 }
 
 // ─── CLIENTES ────────────────────────────────────────────────────────────────
-// Parser por reglas: los renglones etiquetados salen solos, el resto es direccion.
-// No usa IA a proposito — el nombre lo tipea la persona y el original queda guardado.
-function parsearFichaCliente(texto) {
-  const lineas = String(texto || "").split("\n").map(l => l.trim()).filter(Boolean);
-  const out = { direccion: [], barrio: "", localidad: "", provincia: "", dni: "", transporte: "", telefono: "" };
-
-  const limpiar = (l) => l.replace(/^[^:]*[:.]\s*/, "").trim();
-
-  lineas.forEach(l => {
-    const bajo = l.toLowerCase();
-    if (/\bdni\b|documento/.test(bajo)) {
-      const n = l.match(/\d[\d.\s-]{6,}/);
-      out.dni = n ? n[0].replace(/[.\s-]/g, "") : limpiar(l);
-    } else if (/transporte|expreso|flete/.test(bajo)) {
-      out.transporte = limpiar(l) || l;
-    } else if (/celular|tel[eé]fono|\btel\b|\bcel\b|whats/.test(bajo)) {
-      const n = l.match(/[+\d][\d\s()-]{7,}/);
-      out.telefono = n ? n[0].trim() : limpiar(l);
-    } else if (/^prov\b|provincia/.test(bajo)) {
-      out.provincia = limpiar(l) || l.replace(/^prov\.?\s*/i, "").trim();
-    } else if (/^barrio\b/.test(bajo)) {
-      out.barrio = l.replace(/^barrio\s*/i, "").trim();
-    } else if (/^[+\d][\d\s()+-]{8,}$/.test(l)) {
-      if (!out.telefono) out.telefono = l;
-    } else {
-      out.direccion.push(l);
-    }
-  });
-
-  // De los renglones sueltos, el ultimo suele ser la localidad
-  if (out.direccion.length > 1 && !out.localidad) {
-    out.localidad = out.direccion[out.direccion.length - 1];
-    out.direccion = out.direccion.slice(0, -1);
-  }
-  return { ...out, direccion: out.direccion.join(", ") };
-}
+// A proposito NO se interpreta el texto pegado: se guarda tal cual y se muestra
+// tal cual. El nombre real lo tipea la persona.
 
 function Clientes({ vendedoras, esDeposito }) {
   const [lista, setLista] = useState([]);
@@ -660,10 +626,12 @@ function Clientes({ vendedoras, esDeposito }) {
   const [nuevo, setNuevo] = useState(false);
   const [nombreReal, setNombreReal] = useState("");
   const [pegado, setPegado] = useState("");
-  const [campos, setCampos] = useState(null);
   const [guardando, setGuardando] = useState(false);
   const [msg, setMsg] = useState(null);
   const [editId, setEditId] = useState(null);
+  const [parecidos, setParecidos] = useState(null);
+  const [buscandoPar, setBuscandoPar] = useState(false);
+  const [vinculados, setVinculados] = useState({});
 
   const cargar = async () => {
     setCargando(true);
@@ -673,12 +641,8 @@ function Clientes({ vendedoras, esDeposito }) {
   };
   useEffect(() => { cargar(); }, []);
 
-  useEffect(() => {
-    if (pegado.trim()) setCampos(parsearFichaCliente(pegado));
-  }, [pegado]);
-
   const limpiarForm = () => {
-    setNuevo(false); setNombreReal(""); setPegado(""); setCampos(null); setEditId(null);
+    setNuevo(false); setNombreReal(""); setPegado(""); setEditId(null); setParecidos(null);
   };
 
   const guardar = async () => {
@@ -688,13 +652,6 @@ function Clientes({ vendedoras, esDeposito }) {
     const fila = {
       nombre: real.toLowerCase(),
       nombre_real: real,
-      direccion: campos?.direccion || null,
-      barrio: campos?.barrio || null,
-      localidad: campos?.localidad || null,
-      provincia: campos?.provincia || null,
-      dni: campos?.dni || null,
-      transporte: campos?.transporte || null,
-      telefono: campos?.telefono || null,
       texto_original: pegado || null,
     };
     const { error } = await sb.from("clientes").upsert([fila], { onConflict: "nombre" });
@@ -706,32 +663,58 @@ function Clientes({ vendedoras, esDeposito }) {
     cargar();
   };
 
+  // Busca nombres parecidos entre los que ya estan escritos en las ventas
+  const buscarParecidos = async (real) => {
+    const objetivo = String(real || "").toLowerCase().trim();
+    if (!objetivo) return;
+    setBuscandoPar(true);
+    setParecidos(null);
+    const { data: vts } = await sb.from("ventas").select("cliente");
+    const { data: als } = await sb.from("cliente_alias").select("texto");
+    const yaResueltos = new Set((als || []).map(a => a.texto));
+    const cuenta = {};
+    (vts || []).forEach(v => {
+      const n = String(v.cliente || "").trim();
+      if (!n) return;
+      const k = n.toLowerCase();
+      if (k === objetivo || yaResueltos.has(k)) return;
+      cuenta[n] = (cuenta[n] || 0) + 1;
+    });
+    const lista = Object.keys(cuenta)
+      .map(n => ({ nombre: n, ventas: cuenta[n], s: similaridad(objetivo, n.toLowerCase()) }))
+      .filter(x => x.s >= 0.45)
+      .sort((a, b) => b.s - a.s)
+      .slice(0, 12);
+    setParecidos(lista);
+    setBuscandoPar(false);
+  };
+
+  // "Es el mismo": guarda el alias, reescribe las ventas con el nombre real y borra el duplicado
+  const vincular = async (variante, real, esMismo) => {
+    const clave = variante.toLowerCase().trim();
+    const realKey = real.toLowerCase().trim();
+    await sb.from("cliente_alias").upsert(
+      [{ texto: clave, nombre_real: realKey, es_mismo: esMismo }], { onConflict: "texto" });
+    if (esMismo) {
+      await sb.from("ventas").update({ cliente: real }).eq("cliente", variante);
+      await sb.from("clientes").delete().eq("nombre", clave);
+    }
+    setVinculados(v => ({ ...v, [variante]: esMismo ? "mismo" : "distinto" }));
+  };
+
   const editar = (cl) => {
     setNuevo(true);
     setEditId(cl.id);
     setNombreReal(cl.nombre_real || cl.nombre || "");
     setPegado(cl.texto_original || "");
-    setCampos({
-      direccion: cl.direccion || "", barrio: cl.barrio || "", localidad: cl.localidad || "",
-      provincia: cl.provincia || "", dni: cl.dni || "", transporte: cl.transporte || "",
-      telefono: cl.telefono || "",
-    });
   };
 
   const q = busca.toLowerCase().trim();
   const filtrados = !q ? lista : lista.filter(cl =>
-    [cl.nombre_real, cl.nombre, cl.localidad, cl.transporte, cl.telefono, cl.provincia]
+    [cl.nombre_real, cl.nombre, cl.texto_original]
       .some(v => String(v || "").toLowerCase().includes(q)));
 
-  const conFicha = lista.filter(cl => cl.direccion || cl.transporte || cl.telefono).length;
-
-  const campo = (k, label) => (
-    <div style={{ marginBottom: 6 }}>
-      <label style={{ fontSize: 10, color: "#7A5848", display: "block", marginBottom: 2 }}>{label}</label>
-      <input className="input" value={campos?.[k] || ""} style={{ width: "100%", fontSize: 13 }}
-        onChange={e => setCampos(c => ({ ...(c || {}), [k]: e.target.value }))} />
-    </div>
-  );
+  const conFicha = lista.filter(cl => cl.texto_original).length;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -769,21 +752,65 @@ function Clientes({ vendedoras, esDeposito }) {
             placeholder={"Majagua a4076\nBarrio lagos del Leyes.\nArroyo Leyes 3001\nProv.Santa Fe\nDNI 23860821\nTransporte Pedrito\nCelular +54 9 3425 34-2616"}
             style={{ width: "100%", resize: "vertical", fontSize: 13, marginBottom: 12, fontFamily: "inherit" }} />
 
-          {campos && (
-            <div style={{ background: "#FFF8F5", borderRadius: 8, padding: 12, marginBottom: 12 }}>
-              <p style={{ fontSize: 11, color: "#7A5848", marginBottom: 8 }}>
-                Esto entendió — corregí lo que haga falta:
-              </p>
-              {campo("direccion", "Dirección")}
-              {campo("barrio", "Barrio")}
-              {campo("localidad", "Localidad")}
-              {campo("provincia", "Provincia")}
-              {campo("transporte", "Transporte")}
-              {campo("telefono", "Teléfono")}
-              {campo("dni", "DNI")}
-              <p style={{ fontSize: 10, color: "#9A7570", margin: "6px 0 0 0" }}>
-                El mensaje original se guarda entero igual, por las dudas.
-              </p>
+          {/* Nombres parecidos que ya estan en las ventas */}
+          {nombreReal.trim().length >= 3 && (
+            <div style={{ marginBottom: 12 }}>
+              <button onClick={() => buscarParecidos(nombreReal)} disabled={buscandoPar}
+                style={{ background: "#FFF8F5", border: "1px solid #D4A090", borderRadius: 7,
+                         padding: "6px 12px", fontSize: 12, cursor: "pointer", fontFamily: "inherit", color: "#5A3828" }}>
+                {buscandoPar ? "Buscando..." : "Buscar nombres parecidos en el historial"}
+              </button>
+
+              {parecidos && parecidos.length === 0 && (
+                <p style={{ fontSize: 11, color: "#7A5848", marginTop: 8, marginBottom: 0 }}>
+                  No encontré nombres parecidos
+                </p>
+              )}
+
+              {parecidos && parecidos.length > 0 && (
+                <div style={{ marginTop: 8, background: "#FFF8F5", borderRadius: 8, padding: 10 }}>
+                  <p style={{ fontSize: 11, color: "#7A5848", marginBottom: 8 }}>
+                    Estos nombres están escritos en ventas. ¿Son el mismo cliente?
+                  </p>
+                  {parecidos.map((p, i) => {
+                    const estado = vinculados[p.nombre];
+                    return (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
+                                            padding: "5px 0", borderBottom: "1px solid #F0E0D8" }}>
+                        <div style={{ flex: 1, minWidth: 140 }}>
+                          <span style={{ fontSize: 12, fontWeight: 600,
+                                         textDecoration: estado === "distinto" ? "line-through" : "none",
+                                         color: estado === "distinto" ? "#B8A49C" : "#2C1A14" }}>
+                            {p.nombre}
+                          </span>
+                          <span style={{ fontSize: 10, color: "#9A7570" }}> · {p.ventas} venta{p.ventas !== 1 ? "s" : ""} · {Math.round(p.s * 100)}%</span>
+                        </div>
+                        {estado === "mismo" ? (
+                          <span style={{ fontSize: 11, color: "#10B981", fontWeight: 600 }}>✓ unificado</span>
+                        ) : estado === "distinto" ? (
+                          <span style={{ fontSize: 11, color: "#9A7570" }}>es otro</span>
+                        ) : (
+                          <div style={{ display: "flex", gap: 4 }}>
+                            <button onClick={() => vincular(p.nombre, nombreReal, true)}
+                              style={{ background: "#10B981", color: "#fff", border: "none", borderRadius: 6,
+                                       padding: "4px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
+                              Es el mismo
+                            </button>
+                            <button onClick={() => vincular(p.nombre, nombreReal, false)}
+                              style={{ background: "#FFF8F5", color: "#5A3828", border: "1px solid #D4A090", borderRadius: 6,
+                                       padding: "4px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>
+                              Es otro
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <p style={{ fontSize: 10, color: "#9A7570", margin: "8px 0 0 0" }}>
+                    "Es el mismo" reescribe esas ventas con el nombre real y lo recuerda para las próximas lecturas.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -818,7 +845,7 @@ function Clientes({ vendedoras, esDeposito }) {
         )}
         {filtrados.map(cl => {
           const vend = vendedoras.find(v => v.id === cl.vendedora_id);
-          const tieneFicha = cl.direccion || cl.transporte || cl.telefono;
+          const tieneFicha = !!cl.texto_original;
           return (
             <div key={cl.id || cl.nombre} style={{ padding: "10px 14px", borderBottom: "1px solid #F0E0D8" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -827,15 +854,10 @@ function Clientes({ vendedoras, esDeposito }) {
                     {cl.nombre_real || cl.nombre}
                     {!tieneFicha && <span style={{ fontSize: 10, color: "#C9A090", fontWeight: 500 }}> · sin ficha</span>}
                   </p>
-                  {tieneFicha && (
-                    <p style={{ fontSize: 11, color: "#6B4A3E", margin: "2px 0 0 0" }}>
-                      {[cl.direccion, cl.localidad, cl.provincia].filter(Boolean).join(" · ")}
-                    </p>
+                  {cl.texto_original && (
+                    <pre style={{ fontSize: 12, color: "#5A3828", margin: "4px 0 0 0", whiteSpace: "pre-wrap",
+                                  fontFamily: "inherit", lineHeight: 1.45 }}>{cl.texto_original}</pre>
                   )}
-                  <p style={{ fontSize: 11, color: "#7A5848", margin: "2px 0 0 0" }}>
-                    {cl.transporte && <span>🚚 {cl.transporte}  </span>}
-                    {cl.telefono && <span>📞 {cl.telefono}</span>}
-                  </p>
                   {vend && <p style={{ fontSize: 10, color: vend.color, margin: "2px 0 0 0" }}>{vend.nombre}</p>}
                 </div>
                 <button onClick={() => editar(cl)}
