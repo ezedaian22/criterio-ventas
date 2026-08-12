@@ -1,4 +1,8 @@
 <!DOCTYPE html>
+<!-- ═══ Criterio Ventas · v19 ═══
+     Ultimo cambio: en modo conjunto el buscador es propio de cada renglon
+     (antes era compartido y dos conjuntos en un mismo remito se pisaban)
+-->
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
@@ -419,6 +423,7 @@ function App({ onLogout, rol }) {
   const [pagos, setPagos] = useState([]);
   const [catalogo, setCatalogo] = useState([]);
   const [aliases, setAliases] = useState({});
+  const [aliasClientes, setAliasClientes] = useState({});
 
   // Load all data from Supabase on mount
   useEffect(() => {
@@ -441,6 +446,12 @@ function App({ onLogout, rol }) {
       try {
         const cat = await armarCatalogoCompleto();
         if (cat.ok) setCatalogo(cat.rows);
+        const { data: alCli } = await sb.from("cliente_alias").select("*");
+        if (alCli) {
+          const mapaCli = {};
+          alCli.forEach(r => { if (r.texto && r.es_mismo !== false) mapaCli[r.texto] = r.nombre_real; });
+          setAliasClientes(mapaCli);
+        }
         const { data: al } = await sb.from("articulo_alias").select("*");
         if (al) {
           const mapa = {};
@@ -603,7 +614,7 @@ function App({ onLogout, rol }) {
 
       <div style={{ maxWidth: tab === "resumen" ? 1400 : 900, margin: "0 auto", padding: "24px 24px" }} className="fade-in">
         {!esDeposito && tab === "dashboard" && <Dashboard ventas={ventas} vendedoras={vendedoras} pagos={pagos} currentMes={currentMes} getComisionMes={getComisionMes} getPagadoMes={getPagadoMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
-        {!esDeposito && tab === "nueva" && <NuevaVenta vendedoras={vendedoras} clientes={clientes} addVenta={addVenta} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} />}
+        {!esDeposito && tab === "nueva" && <NuevaVenta vendedoras={vendedoras} clientes={clientes} addVenta={addVenta} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} aliasClientes={aliasClientes} />}
         {!esDeposito && tab === "resumen" && <Resumen ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {!esDeposito && tab === "comisiones" && <Comisiones ventas={ventas} vendedoras={vendedoras} pagos={pagos} addPago={addPago} marcarVentasPagadas={marcarVentasPagadas} currentMes={currentMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {!esDeposito && tab === "historial" && <Historial ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
@@ -632,6 +643,7 @@ function Clientes({ vendedoras, esDeposito }) {
   const [parecidos, setParecidos] = useState(null);
   const [buscandoPar, setBuscandoPar] = useState(false);
   const [vinculados, setVinculados] = useState({});
+  const [filtroPar, setFiltroPar] = useState("");
 
   const cargar = async () => {
     setCargando(true);
@@ -663,29 +675,76 @@ function Clientes({ vendedoras, esDeposito }) {
     cargar();
   };
 
-  // Busca nombres parecidos entre los que ya estan escritos en las ventas
+  // Parecido pensado para nombres: combina el char-a-char con match por palabras
+  // (asi "tamara san luis" engancha con "tani san wuis" aunque cambien letras)
+  const parecidoNombre = (a, b) => {
+    const na = normTexto(a), nb = normTexto(b);
+    if (!na || !nb) return 0;
+    if (na === nb) return 1;
+    const ta = na.split(" ").filter(Boolean), tb = nb.split(" ").filter(Boolean);
+    const usados = new Array(tb.length).fill(false);
+    let hits = 0;
+    ta.forEach(p => {
+      let idx = tb.findIndex((q, i) => !usados[i] && q === p);
+      if (idx === -1) {
+        idx = tb.findIndex((q, i) => {
+          if (usados[i]) return false;
+          const n = Math.min(3, Math.min(p.length, q.length));
+          return n >= 3 && p.slice(0, n) === q.slice(0, n);
+        });
+        if (idx !== -1) { usados[idx] = true; hits += 0.8; return; }
+        idx = tb.findIndex((q, i) => !usados[i] && similaridad(p, q) >= 0.6);
+        if (idx !== -1) { usados[idx] = true; hits += 0.6; return; }
+      } else { usados[idx] = true; hits += 1; }
+    });
+    const porPalabra = (2 * hits) / (ta.length + tb.length);
+    return Math.max(porPalabra, similaridad(na, nb));
+  };
+
+  // Trae TODOS los nombres escritos en ventas (Supabase corta en 1000 por consulta)
+  const traerNombresVentas = async () => {
+    let todos = [], desde = 0;
+    while (true) {
+      const { data, error } = await sb.from("ventas").select("cliente").range(desde, desde + 999);
+      if (error || !data || data.length === 0) break;
+      todos = todos.concat(data);
+      if (data.length < 1000) break;
+      desde += 1000;
+    }
+    return todos;
+  };
+
   const buscarParecidos = async (real) => {
     const objetivo = String(real || "").toLowerCase().trim();
     if (!objetivo) return;
     setBuscandoPar(true);
     setParecidos(null);
-    const { data: vts } = await sb.from("ventas").select("cliente");
+    const vts = await traerNombresVentas();
     const { data: als } = await sb.from("cliente_alias").select("texto");
     const yaResueltos = new Set((als || []).map(a => a.texto));
+
     const cuenta = {};
-    (vts || []).forEach(v => {
+    vts.forEach(v => {
       const n = String(v.cliente || "").trim();
       if (!n) return;
       const k = n.toLowerCase();
       if (k === objetivo || yaResueltos.has(k)) return;
       cuenta[n] = (cuenta[n] || 0) + 1;
     });
-    const lista = Object.keys(cuenta)
-      .map(n => ({ nombre: n, ventas: cuenta[n], s: similaridad(objetivo, n.toLowerCase()) }))
-      .filter(x => x.s >= 0.45)
-      .sort((a, b) => b.s - a.s)
-      .slice(0, 12);
-    setParecidos(lista);
+    // Tambien los que estan como cliente pero todavia no tienen ventas
+    lista.forEach(cl => {
+      const n = String(cl.nombre_real || cl.nombre || "").trim();
+      if (!n) return;
+      const k = n.toLowerCase();
+      if (k === objetivo || yaResueltos.has(k) || cuenta[n] !== undefined) return;
+      cuenta[n] = 0;
+    });
+
+    const todas = Object.keys(cuenta)
+      .map(n => ({ nombre: n, ventas: cuenta[n], s: parecidoNombre(objetivo, n) }))
+      .sort((a, b) => b.s - a.s);
+
+    setParecidos({ lista: todas.filter(x => x.s >= 0.4).slice(0, 20), todas, total: vts.length });
     setBuscandoPar(false);
   };
 
@@ -761,56 +820,68 @@ function Clientes({ vendedoras, esDeposito }) {
                 {buscandoPar ? "Buscando..." : "Buscar nombres parecidos en el historial"}
               </button>
 
-              {parecidos && parecidos.length === 0 && (
-                <p style={{ fontSize: 11, color: "#7A5848", marginTop: 8, marginBottom: 0 }}>
-                  No encontré nombres parecidos
-                </p>
-              )}
+              {parecidos && (() => {
+                const q = normTexto(filtroPar);
+                const visibles = q
+                  ? parecidos.todas.filter(x => normTexto(x.nombre).includes(q)).slice(0, 25)
+                  : parecidos.lista;
+                return (
+                  <div style={{ marginTop: 8, background: "#FFF8F5", borderRadius: 8, padding: 10 }}>
+                    <p style={{ fontSize: 11, color: "#7A5848", marginBottom: 6 }}>
+                      Revisé {parecidos.total} ventas · {parecidos.lista.length} parecidos
+                    </p>
+                    <input className="input" value={filtroPar} onChange={e => setFiltroPar(e.target.value)}
+                      placeholder="¿Falta alguno? Buscalo acá por cualquier parte del nombre"
+                      style={{ width: "100%", fontSize: 12, marginBottom: 8 }} />
 
-              {parecidos && parecidos.length > 0 && (
-                <div style={{ marginTop: 8, background: "#FFF8F5", borderRadius: 8, padding: 10 }}>
-                  <p style={{ fontSize: 11, color: "#7A5848", marginBottom: 8 }}>
-                    Estos nombres están escritos en ventas. ¿Son el mismo cliente?
-                  </p>
-                  {parecidos.map((p, i) => {
-                    const estado = vinculados[p.nombre];
-                    return (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
-                                            padding: "5px 0", borderBottom: "1px solid #F0E0D8" }}>
-                        <div style={{ flex: 1, minWidth: 140 }}>
-                          <span style={{ fontSize: 12, fontWeight: 600,
-                                         textDecoration: estado === "distinto" ? "line-through" : "none",
-                                         color: estado === "distinto" ? "#B8A49C" : "#2C1A14" }}>
-                            {p.nombre}
-                          </span>
-                          <span style={{ fontSize: 10, color: "#9A7570" }}> · {p.ventas} venta{p.ventas !== 1 ? "s" : ""} · {Math.round(p.s * 100)}%</span>
-                        </div>
-                        {estado === "mismo" ? (
-                          <span style={{ fontSize: 11, color: "#10B981", fontWeight: 600 }}>✓ unificado</span>
-                        ) : estado === "distinto" ? (
-                          <span style={{ fontSize: 11, color: "#9A7570" }}>es otro</span>
-                        ) : (
-                          <div style={{ display: "flex", gap: 4 }}>
-                            <button onClick={() => vincular(p.nombre, nombreReal, true)}
-                              style={{ background: "#10B981", color: "#fff", border: "none", borderRadius: 6,
-                                       padding: "4px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
-                              Es el mismo
-                            </button>
-                            <button onClick={() => vincular(p.nombre, nombreReal, false)}
-                              style={{ background: "#FFF8F5", color: "#5A3828", border: "1px solid #D4A090", borderRadius: 6,
-                                       padding: "4px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>
-                              Es otro
-                            </button>
+                    {visibles.length === 0 && (
+                      <p style={{ fontSize: 11, color: "#7A5848", margin: 0 }}>
+                        {q ? "Ningún nombre contiene eso" : "No encontré nombres parecidos"}
+                      </p>
+                    )}
+
+                    {visibles.map((p, i) => {
+                      const estado = vinculados[p.nombre];
+                      return (
+                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
+                                              padding: "5px 0", borderBottom: "1px solid #F0E0D8" }}>
+                          <div style={{ flex: 1, minWidth: 140 }}>
+                            <span style={{ fontSize: 12, fontWeight: 600,
+                                           textDecoration: estado === "distinto" ? "line-through" : "none",
+                                           color: estado === "distinto" ? "#B8A49C" : "#2C1A14" }}>
+                              {p.nombre}
+                            </span>
+                            <span style={{ fontSize: 10, color: "#9A7570" }}>
+                              {" "}· {p.ventas} venta{p.ventas !== 1 ? "s" : ""} · {Math.round(p.s * 100)}%
+                            </span>
                           </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                  <p style={{ fontSize: 10, color: "#9A7570", margin: "8px 0 0 0" }}>
-                    "Es el mismo" reescribe esas ventas con el nombre real y lo recuerda para las próximas lecturas.
-                  </p>
-                </div>
-              )}
+                          {estado === "mismo" ? (
+                            <span style={{ fontSize: 11, color: "#10B981", fontWeight: 600 }}>✓ unificado</span>
+                          ) : estado === "distinto" ? (
+                            <span style={{ fontSize: 11, color: "#9A7570" }}>es otro</span>
+                          ) : (
+                            <div style={{ display: "flex", gap: 4 }}>
+                              <button onClick={() => vincular(p.nombre, nombreReal, true)}
+                                style={{ background: "#10B981", color: "#fff", border: "none", borderRadius: 6,
+                                         padding: "4px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
+                                Es el mismo
+                              </button>
+                              <button onClick={() => vincular(p.nombre, nombreReal, false)}
+                                style={{ background: "#FFF8F5", color: "#5A3828", border: "1px solid #D4A090", borderRadius: 6,
+                                         padding: "4px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>
+                                Es otro
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <p style={{ fontSize: 10, color: "#9A7570", margin: "8px 0 0 0" }}>
+                      "Es el mismo" reescribe esas ventas con el nombre real y lo recuerda para las próximas lecturas.
+                    </p>
+                  </div>
+                );
+              })()}
             </div>
           )}
 
@@ -1207,13 +1278,15 @@ const PROMPT_EXTRACCION = `Analizá este presupuesto/comprobante de venta de rop
 {
   "cliente": "nombre del cliente o null",
   "total": número total de la venta como número (sin descuento aplicado si hay uno separado) o null,
-  "totalConDescuento": número total final después del descuento o null,
+  "totalConDescuento": número total de LA MERCADERIA despues del descuento, SIN sumar saldos ni deudas previas, o null,
+  "saldoAnterior": si el remito trae un saldo, deuda o cuenta anterior sumada aparte, ese número; si no hay, null,
   "items": [{"codigo": "codigo de articulo si figura, o null", "descripcion": "...", "cantidad": N, "precio": N, "total": N}],
   "descuento": número de descuento aplicado o null,
   "notas": "cualquier nota relevante o null"
 }
 No leas la fecha del comprobante.
 El codigo de articulo suele ser un numero corto (1 a 4 digitos) al lado de la descripcion. Si no lo ves, poné null; NO lo inventes ni lo deduzcas de la descripcion.
+IMPORTANTE con los totales: a veces el remito suma un saldo o deuda anterior al final (puede decir "saldo", "deuda", "cta anterior", "resto"). Ese monto NO es parte de la venta: va en saldoAnterior y NO se incluye en total ni en totalConDescuento. Los campos total y totalConDescuento son solo por la mercaderia de este remito.
 Si no podés leer algún campo, poné null.`;
 
 const BACKUP_API_KEY = "AIzaSyDaAuhseWd2ktPgwi0w1AzKjHRoQyIIHg8";
@@ -1272,13 +1345,15 @@ async function extraerDatosFotoBase64(base64, mediaType) {
   throw lastError || new Error("No se pudo procesar la imagen");
 }
 
-function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias }) {
+function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias, totalForm }) {
   const [expanded, setExpanded] = React.useState(false);
   const [guardado, setGuardado] = React.useState({});
   const [errorAlias, setErrorAlias] = React.useState(null);
   const [selConjunto, setSelConjunto] = React.useState({});
+  const [modoConjunto, setModoConjunto] = React.useState({});
   const [corrigiendo, setCorrigiendo] = React.useState(null);
   const [busquedaArt, setBusquedaArt] = React.useState("");
+  const [busqConj, setBusqConj] = React.useState({});
 
   // Busca en TODO el catalogo, por codigo o por descripcion
   const buscarEnCatalogo = (txt) => {
@@ -1346,9 +1421,15 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias }
   // Los items suman ANTES del descuento, asi que se comparan contra el bruto
   const sumaItems = items.reduce((s, it) => s + Number(it.total || 0), 0);
   const totalBruto = Number(extracted.total ?? 0);
-  const totalRemito = Number(extracted.totalConDescuento ?? extracted.total ?? 0);
+  // Si el usuario corrigio el total a mano, ese manda: es el que se va a guardar
+  const totalRemito = Number(totalForm) > 0
+    ? Number(totalForm)
+    : Number(extracted.totalConDescuento ?? extracted.total ?? 0);
+  const saldoAnt = Number(extracted.saldoAnterior || 0);
   const baseCmp = totalBruto > 0 ? totalBruto : totalRemito;
   const descuadre = items.length > 0 && baseCmp > 0 && Math.abs(sumaItems - baseCmp) > Math.max(1, baseCmp * 0.02);
+  // Si la diferencia coincide con el saldo, no es una linea faltante sino deuda vieja
+  const difEsSaldo = saldoAnt > 0 && Math.abs(Math.abs(sumaItems - baseCmp) - saldoAnt) < Math.max(1, saldoAnt * 0.02);
   // Descuento real deducido de los numeros (mas confiable que lo que lee la IA)
   const descReal = sumaItems > 0 && totalRemito > 0 && totalRemito < sumaItems
     ? Math.round((1 - totalRemito / sumaItems) * 1000) / 10
@@ -1382,16 +1463,30 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias }
                 {x.m.codigo && x.m.costo_total === null ? " · ⚠ sin costo cargado" : ""}
               </p>
             )}
-            {x.m && x.m.estado === "conjunto" && (() => {
-              const opciones = candidatosConjunto(x.it.descripcion, catalogo);
+            {x.m && (x.m.estado === "conjunto" || modoConjunto[i]) && (() => {
+              const base = candidatosConjunto(x.it.descripcion, catalogo);
+              const qConj = busqConj[i] || "";
+              const extra = qConj ? buscarEnCatalogo(qConj) : [];
+              const yaSel = (selConjunto[i] || [])
+                .map(cod => (catalogo || []).find(a => normCodigo(a.codigo) === normCodigo(cod)))
+                .filter(Boolean);
+              const vistos = new Set();
+              const opciones = [...yaSel, ...extra, ...base].filter(o => {
+                const k = normCodigo(o.codigo);
+                if (vistos.has(k)) return false;
+                vistos.add(k); return true;
+              });
               const sel = selConjunto[i] || [];
-              const costoSel = opciones.filter(o => sel.includes(o.codigo))
-                .reduce((s, o) => s + Number(o.costo_total || 0), 0);
+              const costoSel = yaSel.reduce((s, o) => s + Number(o.costo_total || 0), 0);
               return (
                 <div style={{ margin: "4px 0 0 0" }}>
-                  {opciones.length === 0 && (
+                  <input className="input" value={qConj}
+                    onChange={e => setBusqConj(b => ({ ...b, [i]: e.target.value }))}
+                    placeholder="Buscar más artículos por código o descripción..."
+                    style={{ width: "100%", fontSize: 11, marginBottom: 6 }} />
+                  {opciones.length === 0 && !qConj && (
                     <p style={{ fontSize: 10, color: "#B3261E", margin: 0 }}>
-                      No encontré artículos con esas palabras en el catálogo
+                      No encontré artículos con esas palabras — buscalos arriba
                     </p>
                   )}
                   {opciones.length > 0 && (
@@ -1459,11 +1554,21 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias }
 
             {/* Corrector universal: sirve tambien cuando el match salio verde pero esta mal */}
             {x.m && x.m.estado !== "conjunto" && (
-              <button onClick={() => { setCorrigiendo(corrigiendo === i ? null : i); setBusquedaArt(""); }}
-                style={{ background: "none", border: "none", color: "#A85D43", cursor: "pointer",
-                         fontSize: 10, padding: "3px 0", textDecoration: "underline", fontFamily: "inherit" }}>
-                {corrigiendo === i ? "Cerrar" : (x.m.codigo ? "No es este / cambiar" : "Buscar en el catálogo")}
-              </button>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <button onClick={() => { setCorrigiendo(corrigiendo === i ? null : i); setBusquedaArt(""); }}
+                  style={{ background: "none", border: "none", color: "#A85D43", cursor: "pointer",
+                           fontSize: 10, padding: "3px 0", textDecoration: "underline", fontFamily: "inherit" }}>
+                  {corrigiendo === i ? "Cerrar" : (x.m.codigo ? "No es este / cambiar" : "Buscar en el catálogo")}
+                </button>
+                <button onClick={() => {
+                    setModoConjunto(m => ({ ...m, [i]: !m[i] }));
+                    setCorrigiendo(null);
+                  }}
+                  style={{ background: "none", border: "none", color: "#7C3AED", cursor: "pointer",
+                           fontSize: 10, padding: "3px 0", textDecoration: "underline", fontFamily: "inherit" }}>
+                  {modoConjunto[i] ? "Volver a un solo artículo" : "⊞ Son varios artículos"}
+                </button>
+              </div>
             )}
 
             {corrigiendo === i && (
@@ -1506,13 +1611,19 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias }
       {extracted.descuento && <p style={{ fontSize: 11, color: "#F87171", marginTop: 4 }}>Descuento: -{fmtPeso(extracted.descuento)}</p>}
       <p style={{ fontSize: 13, fontWeight: 700, color: "#A85D43", marginTop: 4 }}>Total: {fmtPeso(totalRemito)}</p>
 
+      {saldoAnt > 0 && (
+        <p style={{ fontSize: 11, color: "#8A5A2B", marginTop: 4, fontWeight: 600 }}>
+          Saldo anterior detectado: {fmtPeso(saldoAnt)} — no cuenta como venta ni entra en el margen
+        </p>
+      )}
+
       {descReal !== null && descReal > 0.5 && (
         <p style={{ fontSize: 11, color: "#7A5848", marginTop: 2 }}>
           Items suman {fmtPeso(sumaItems)} → descuento aplicado ≈ {descReal}%
         </p>
       )}
 
-      {descuadre && (
+      {descuadre && !difEsSaldo && (
         <p style={{ fontSize: 11, color: "#B3261E", fontWeight: 600, marginTop: 4 }}>
           ⚠ Los items suman {fmtPeso(sumaItems)} y el subtotal dice {fmtPeso(baseCmp)} — falta o sobra alguna línea
         </p>
@@ -1551,7 +1662,7 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias }
   );
 }
 
-function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases, guardarAlias }) {
+function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases, guardarAlias, aliasClientes }) {
   const fileRef = useRef();
   const fileRefMulti = useRef();
 
@@ -1594,11 +1705,22 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
   });
 
   const buildForm = (extracted, prevForm) => {
-    const clienteLower = (extracted?.cliente || "").toLowerCase().trim();
+    const leido = (extracted?.cliente || "").trim();
+    // Si ese nombre mal leido ya fue unificado, se usa el nombre real
+    const real = aliasClientes?.[leido.toLowerCase()] || null;
+    const clienteFinal = real || leido;
+    const clienteLower = clienteFinal.toLowerCase().trim();
     const vendedoraIdAuto = buscarCliente(clienteLower, clientes) || "";
-    const totalFinal = extracted?.totalConDescuento ?? extracted?.total ?? "";
+    // El total que se guarda es solo la mercaderia; si vino con saldo sumado, se descuenta
+    let totalFinal = extracted?.totalConDescuento ?? extracted?.total ?? "";
+    const saldo = Number(extracted?.saldoAnterior || 0);
+    const sumaIt = (extracted?.items || []).reduce((s, it) => s + Number(it.total || 0), 0);
+    if (saldo > 0 && Number(totalFinal) > 0 && sumaIt > 0 && Number(totalFinal) > sumaIt) {
+      totalFinal = Number(totalFinal) - saldo;
+    }
     return {
-      cliente: extracted?.cliente || prevForm?.cliente || "",
+      cliente: clienteFinal || prevForm?.cliente || "",
+      _clienteLeido: real ? leido : null,
       vendedoraId: vendedoraIdAuto ? String(vendedoraIdAuto) : (prevForm?.vendedoraId || ""),
       total: totalFinal !== null && totalFinal !== undefined && totalFinal !== "" ? totalFinal : (prevForm?.total || ""),
       fecha: fechaLote(),
@@ -1668,8 +1790,9 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
     const item = queue[idx];
     if (!item.form.vendedoraId || !item.form.total) return;
     const cost = costearVenta(item.extracted, catalogo, aliases);
+    const { _clienteLeido, ...formLimpio } = item.form;
     addVenta({
-      ...item.form,
+      ...formLimpio,
       vendedoraId: Number(item.form.vendedoraId),
       total: Number(item.form.total),
       costo_total: cost.costoTotal,
@@ -1844,7 +1967,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
                     </div>
                   )}
                   {activeItem.extracted && (
-                    <ItemsDetectados extracted={activeItem.extracted} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} />
+                    <ItemsDetectados extracted={activeItem.extracted} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} totalForm={activeItem.form.total} />
                   )}
                 </div>
               </div>
@@ -1859,6 +1982,11 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
                     const auto = buscarCliente(val, clientes);
                     if (auto) updateForm(activeIdx, "vendedoraId", String(auto));
                   }} placeholder="Nombre del cliente" />
+                {activeItem.form._clienteLeido && (
+                  <p style={{ fontSize: 11, color: "#A85D43", marginTop: 4, fontWeight: 600 }}>
+                    ✓ Corregido — la foto decía "{activeItem.form._clienteLeido}"
+                  </p>
+                )}
                 {activeItem.form.cliente && buscarCliente(activeItem.form.cliente, clientes) && (
                   <p style={{ fontSize: 11, color: "#10B981", marginTop: 4 }}>
                     ✓ Cliente conocido → {vendedoras.find(v => v.id === buscarCliente(activeItem.form.cliente, clientes))?.nombre}
