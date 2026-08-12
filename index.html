@@ -1,7 +1,7 @@
 <!DOCTYPE html>
-<!-- ═══ Criterio Ventas · v19 ═══
-     Ultimo cambio: en modo conjunto el buscador es propio de cada renglon
-     (antes era compartido y dos conjuntos en un mismo remito se pisaban)
+<!-- ═══ Criterio Ventas · v20 ═══
+     Ultimo cambio: solapa Articulos — ranking de que se vende mas y menos
+     por unidades, facturacion y ganancia, con filtros de periodo
 -->
 <html lang="es">
 <head>
@@ -422,6 +422,7 @@ function App({ onLogout, rol }) {
   const [clientes, setClientes] = useState({});
   const [pagos, setPagos] = useState([]);
   const [catalogo, setCatalogo] = useState([]);
+  const [ventaItems, setVentaItems] = useState([]);
   const [aliases, setAliases] = useState({});
   const [aliasClientes, setAliasClientes] = useState({});
 
@@ -446,6 +447,17 @@ function App({ onLogout, rol }) {
       try {
         const cat = await armarCatalogoCompleto();
         if (cat.ok) setCatalogo(cat.rows);
+        // venta_items paginado: Supabase corta en 1000 por consulta
+        let itAcum = [], desdeIt = 0;
+        while (true) {
+          const { data: itd, error: ite } = await sb.from("venta_items").select("*").range(desdeIt, desdeIt + 999);
+          if (ite || !itd || itd.length === 0) break;
+          itAcum = itAcum.concat(itd);
+          if (itd.length < 1000) break;
+          desdeIt += 1000;
+        }
+        setVentaItems(itAcum);
+
         const { data: alCli } = await sb.from("cliente_alias").select("*");
         if (alCli) {
           const mapaCli = {};
@@ -604,7 +616,7 @@ function App({ onLogout, rol }) {
           <div style={{ display: "flex", gap: 0, marginTop: 8, overflowX: "auto", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
             {(esDeposito
               ? [["clientes","Clientes"]]
-              : [["dashboard","Dashboard"],["nueva","Nueva Venta"],["resumen","Resumen"],["comisiones","Comisiones"],["historial","Historial"],["clientes","Clientes"],["comparar","Comparar"],["config","Config"]]
+              : [["dashboard","Dashboard"],["nueva","Nueva Venta"],["resumen","Resumen"],["comisiones","Comisiones"],["historial","Historial"],["articulos","Artículos"],["clientes","Clientes"],["comparar","Comparar"],["config","Config"]]
              ).map(([k,l]) => (
               <button key={k} className={`tab-btn ${tab===k?"active":""}`} onClick={() => setTab(k)}>{l}</button>
             ))}
@@ -619,9 +631,194 @@ function App({ onLogout, rol }) {
         {!esDeposito && tab === "comisiones" && <Comisiones ventas={ventas} vendedoras={vendedoras} pagos={pagos} addPago={addPago} marcarVentasPagadas={marcarVentasPagadas} currentMes={currentMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {!esDeposito && tab === "historial" && <Historial ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {!esDeposito && tab === "comparar" && <Comparar ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
+        {!esDeposito && tab === "articulos" && <Articulos ventaItems={ventaItems} ventas={ventas} catalogo={catalogo} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "clientes" && <Clientes vendedoras={vendedoras} esDeposito={esDeposito} />}
         {!esDeposito && tab === "config" && <Config vendedoras={vendedoras} setVendedoras={setVendedoras} clientes={clientes} setClientes={setClientes} ventas={ventas} setVentas={setVentas} setPagos={setPagos} pagos={pagos} catalogo={catalogo} aliases={aliases} />}
       </div>
+    </div>
+  );
+}
+
+// ─── ARTICULOS: que se vende mas y que menos ─────────────────────────────────
+function Articulos({ ventaItems, ventas, catalogo, fmtPeso, MESES, getMonthKey }) {
+  const [orden, setOrden] = useState("unidades");
+  const [periodo, setPeriodo] = useState("todo");
+  const [verFondo, setVerFondo] = useState(false);
+
+  const fmtCorto = (n) => {
+    const v = Number(n || 0);
+    if (!v) return "—";
+    if (Math.abs(v) >= 1000000) return (v / 1000000).toFixed(1).replace(".", ",") + "M";
+    if (Math.abs(v) >= 1000) return Math.round(v / 1000) + "k";
+    return String(Math.round(v));
+  };
+
+  // venta_id -> mes, para poder filtrar por periodo
+  const mesDeVenta = (() => {
+    const m = {};
+    ventas.forEach(v => { m[v.id] = getMonthKey(v.fecha); });
+    return m;
+  })();
+
+  const hoy = new Date();
+  const mesActual = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}`;
+  const haceMeses = (n) => {
+    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - n);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  };
+
+  const enPeriodo = (mk) => {
+    if (!mk) return periodo === "todo";
+    if (periodo === "todo") return true;
+    if (periodo === "mes") return mk === mesActual;
+    if (periodo === "3") return mk >= haceMeses(2);
+    if (periodo === "12") return mk >= haceMeses(11);
+    return true;
+  };
+
+  // Agregado por codigo de articulo
+  const agregado = (() => {
+    const m = {};
+    let sinCodigo = 0, itemsUsados = 0;
+    ventaItems.forEach(it => {
+      const mk = mesDeVenta[it.venta_id];
+      if (!enPeriodo(mk)) return;
+      const cod = it.articulo_codigo;
+      if (!cod) { sinCodigo++; return; }
+      itemsUsados++;
+      const cant = Number(it.cantidad || 0);
+      const fact = Number(it.total_item || 0);
+      const cu = it.costo_unitario === null || it.costo_unitario === undefined ? null : Number(it.costo_unitario);
+      if (!m[cod]) m[cod] = { codigo: cod, unidades: 0, facturacion: 0, costo: 0, ops: 0, sinCosto: false };
+      m[cod].unidades += cant;
+      m[cod].facturacion += fact;
+      m[cod].ops += 1;
+      if (cu === null) m[cod].sinCosto = true;
+      else m[cod].costo += cu * cant;
+    });
+    const arr = Object.values(m).map(a => {
+      const art = (catalogo || []).find(x => String(x.codigo).trim().toUpperCase() === String(a.codigo).trim().toUpperCase());
+      return { ...a, descripcion: art ? art.descripcion : "(fuera del catálogo)",
+               ganancia: a.sinCosto ? null : a.facturacion - a.costo };
+    });
+    return { arr, sinCodigo, itemsUsados };
+  })();
+
+  const ordenados = [...agregado.arr].sort((a, b) => {
+    if (orden === "unidades") return b.unidades - a.unidades;
+    if (orden === "facturacion") return b.facturacion - a.facturacion;
+    return (b.ganancia ?? -Infinity) - (a.ganancia ?? -Infinity);
+  });
+  const mostrados = verFondo ? [...ordenados].reverse() : ordenados;
+
+  const totUnid = agregado.arr.reduce((s, a) => s + a.unidades, 0);
+  const totFact = agregado.arr.reduce((s, a) => s + a.facturacion, 0);
+  const totGan = agregado.arr.reduce((s, a) => s + (a.ganancia || 0), 0);
+
+  const btn = (activo) => ({
+    background: activo ? "#A85D43" : "#FFF8F5", color: activo ? "#fff" : "#5A3828",
+    border: "1px solid #D4A090", borderRadius: 7, padding: "5px 11px", fontSize: 11,
+    cursor: "pointer", fontFamily: "inherit",
+  });
+
+  const th = { fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.05em",
+               padding: "8px 6px", textAlign: "right", fontWeight: 600, whiteSpace: "nowrap" };
+  const td = { fontSize: 13, padding: "8px 6px", textAlign: "right", whiteSpace: "nowrap" };
+
+  if (!ventaItems.length) {
+    return (
+      <div className="card">
+        <p style={{ fontSize: 13, fontWeight: 700, color: "#8A5A2B", margin: 0 }}>
+          Todavía no hay datos de artículos
+        </p>
+        <p style={{ fontSize: 12, color: "#7A5848", margin: "6px 0 0 0" }}>
+          El detalle por artículo se empieza a guardar recién con las ventas que cargues de ahora en más.
+          Las ventas viejas nunca guardaron qué artículos eran, así que no hay ranking hacia atrás.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+
+      <div className="card" style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center", padding: "12px 16px" }}>
+        <div>
+          <span style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase" }}>Unidades </span>
+          <span style={{ fontSize: 17, fontWeight: 700 }}>{totUnid}</span>
+        </div>
+        <div>
+          <span style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase" }}>Facturación </span>
+          <span style={{ fontSize: 17, fontWeight: 700 }}>{fmtPeso(totFact)}</span>
+        </div>
+        <div>
+          <span style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase" }}>Ganancia </span>
+          <span style={{ fontSize: 17, fontWeight: 700, color: "#10B981" }}>{fmtPeso(totGan)}</span>
+        </div>
+
+        <div style={{ display: "flex", gap: 5, marginLeft: "auto", flexWrap: "wrap" }}>
+          <button onClick={() => setPeriodo("mes")} style={btn(periodo === "mes")}>Este mes</button>
+          <button onClick={() => setPeriodo("3")} style={btn(periodo === "3")}>3 meses</button>
+          <button onClick={() => setPeriodo("12")} style={btn(periodo === "12")}>12 meses</button>
+          <button onClick={() => setPeriodo("todo")} style={btn(periodo === "todo")}>Todo</button>
+        </div>
+      </div>
+
+      <div className="card" style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", padding: "10px 16px" }}>
+        <span style={{ fontSize: 11, color: "#7A5848" }}>Ordenar por:</span>
+        <button onClick={() => setOrden("unidades")} style={btn(orden === "unidades")}>Unidades</button>
+        <button onClick={() => setOrden("facturacion")} style={btn(orden === "facturacion")}>Facturación</button>
+        <button onClick={() => setOrden("ganancia")} style={btn(orden === "ganancia")}>Ganancia</button>
+        <button onClick={() => setVerFondo(v => !v)}
+          style={{ ...btn(verFondo), marginLeft: "auto" }}>
+          {verFondo ? "↑ Los que más" : "↓ Los que menos"}
+        </button>
+      </div>
+
+      <div className="card" style={{ padding: 0, overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 560 }}>
+          <thead>
+            <tr style={{ borderBottom: "2px solid #E8C4B0" }}>
+              <th style={{ ...th, textAlign: "left" }}>Artículo</th>
+              <th style={{ ...th, color: orden === "unidades" ? "#A85D43" : "#7A5848" }}>Unid.</th>
+              <th style={{ ...th, color: orden === "facturacion" ? "#A85D43" : "#7A5848" }}>Facturación</th>
+              <th style={th}>Costo</th>
+              <th style={{ ...th, color: orden === "ganancia" ? "#A85D43" : "#7A5848" }}>Ganancia</th>
+              <th style={th}>Margen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {mostrados.slice(0, 40).map((a, i) => {
+              const pctMargen = a.ganancia !== null && a.facturacion > 0
+                ? Math.round((a.ganancia / a.facturacion) * 100) : null;
+              return (
+                <tr key={a.codigo} style={{ borderBottom: "1px solid #F0E0D8" }}>
+                  <td style={{ ...td, textAlign: "left", maxWidth: 260, whiteSpace: "normal" }}>
+                    <span style={{ fontSize: 10, color: "#9A7570" }}>{i + 1}. </span>
+                    <b>{a.codigo}</b>
+                    <span style={{ fontSize: 12, color: "#5A3828" }}> — {a.descripcion}</span>
+                    <span style={{ fontSize: 10, color: "#B8A49C" }}> · {a.ops} vta{a.ops !== 1 ? "s" : ""}</span>
+                  </td>
+                  <td style={{ ...td, fontWeight: 700 }}>{a.unidades}</td>
+                  <td style={td}>{fmtCorto(a.facturacion)}</td>
+                  <td style={{ ...td, color: "#9A7570" }}>{a.sinCosto ? "s/d" : fmtCorto(a.costo)}</td>
+                  <td style={{ ...td, color: a.ganancia === null ? "#C9B3A8" : a.ganancia >= 0 ? "#10B981" : "#F87171", fontWeight: 600 }}>
+                    {a.ganancia === null ? "s/d" : fmtCorto(a.ganancia)}
+                  </td>
+                  <td style={{ ...td, fontSize: 11, color: "#7A5848" }}>
+                    {pctMargen === null ? "—" : `${pctMargen}%`}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <p style={{ fontSize: 10, color: "#7A5848", textAlign: "center", margin: 0 }}>
+        {agregado.itemsUsados} renglones contados · {agregado.arr.length} artículos distintos
+        {agregado.sinCodigo > 0 && ` · ⚠ ${agregado.sinCodigo} renglones sin artículo identificado quedaron afuera`}
+      </p>
     </div>
   );
 }
