@@ -1,7 +1,7 @@
 <!DOCTYPE html>
-<!-- ═══ Criterio Ventas · v20 ═══
-     Ultimo cambio: solapa Articulos — ranking de que se vende mas y menos
-     por unidades, facturacion y ganancia, con filtros de periodo
+<!-- ═══ Criterio Ventas · v21 ═══
+     Ultimo cambio: en Articulos se puede ordenar por Margen %% y por $/prenda,
+     no solo por ganancia absoluta (que iba pegada al volumen)
 -->
 <html lang="es">
 <head>
@@ -644,6 +644,7 @@ function Articulos({ ventaItems, ventas, catalogo, fmtPeso, MESES, getMonthKey }
   const [orden, setOrden] = useState("unidades");
   const [periodo, setPeriodo] = useState("todo");
   const [verFondo, setVerFondo] = useState(false);
+  const [soloConHistoria, setSoloConHistoria] = useState(true);
 
   const fmtCorto = (n) => {
     const v = Number(n || 0);
@@ -698,8 +699,11 @@ function Articulos({ ventaItems, ventas, catalogo, fmtPeso, MESES, getMonthKey }
     });
     const arr = Object.values(m).map(a => {
       const art = (catalogo || []).find(x => String(x.codigo).trim().toUpperCase() === String(a.codigo).trim().toUpperCase());
+      const gan = a.sinCosto ? null : a.facturacion - a.costo;
       return { ...a, descripcion: art ? art.descripcion : "(fuera del catálogo)",
-               ganancia: a.sinCosto ? null : a.facturacion - a.costo };
+               ganancia: gan,
+               margenPct: gan !== null && a.facturacion > 0 ? (gan / a.facturacion) * 100 : null,
+               ganUnidad: gan !== null && a.unidades > 0 ? gan / a.unidades : null };
     });
     return { arr, sinCodigo, itemsUsados };
   })();
@@ -707,9 +711,17 @@ function Articulos({ ventaItems, ventas, catalogo, fmtPeso, MESES, getMonthKey }
   const ordenados = [...agregado.arr].sort((a, b) => {
     if (orden === "unidades") return b.unidades - a.unidades;
     if (orden === "facturacion") return b.facturacion - a.facturacion;
+    if (orden === "margen") return (b.margenPct ?? -Infinity) - (a.margenPct ?? -Infinity);
+    if (orden === "porUnidad") return (b.ganUnidad ?? -Infinity) - (a.ganUnidad ?? -Infinity);
     return (b.ganancia ?? -Infinity) - (a.ganancia ?? -Infinity);
   });
-  const mostrados = verFondo ? [...ordenados].reverse() : ordenados;
+  // Ordenando por margen o por $/prenda, un articulo con una sola venta puede quedar
+  // primero por casualidad. Con 3+ ventas el dato es mas confiable.
+  const porcentual = orden === "margen" || orden === "porUnidad";
+  const base = (porcentual && soloConHistoria)
+    ? ordenados.filter(a => a.ops >= 3)
+    : ordenados;
+  const mostrados = verFondo ? [...base].reverse() : base;
 
   const totUnid = agregado.arr.reduce((s, a) => s + a.unidades, 0);
   const totFact = agregado.arr.reduce((s, a) => s + a.facturacion, 0);
@@ -768,7 +780,14 @@ function Articulos({ ventaItems, ventas, catalogo, fmtPeso, MESES, getMonthKey }
         <span style={{ fontSize: 11, color: "#7A5848" }}>Ordenar por:</span>
         <button onClick={() => setOrden("unidades")} style={btn(orden === "unidades")}>Unidades</button>
         <button onClick={() => setOrden("facturacion")} style={btn(orden === "facturacion")}>Facturación</button>
-        <button onClick={() => setOrden("ganancia")} style={btn(orden === "ganancia")}>Ganancia</button>
+        <button onClick={() => setOrden("ganancia")} style={btn(orden === "ganancia")}>Ganancia $</button>
+        <button onClick={() => setOrden("margen")} style={btn(orden === "margen")}>Margen %</button>
+        <button onClick={() => setOrden("porUnidad")} style={btn(orden === "porUnidad")}>$ por prenda</button>
+        {porcentual && (
+          <button onClick={() => setSoloConHistoria(v => !v)} style={btn(soloConHistoria)}>
+            {soloConHistoria ? "✓ 3+ ventas" : "incluir los de 1-2 ventas"}
+          </button>
+        )}
         <button onClick={() => setVerFondo(v => !v)}
           style={{ ...btn(verFondo), marginLeft: "auto" }}>
           {verFondo ? "↑ Los que más" : "↓ Los que menos"}
@@ -783,8 +802,9 @@ function Articulos({ ventaItems, ventas, catalogo, fmtPeso, MESES, getMonthKey }
               <th style={{ ...th, color: orden === "unidades" ? "#A85D43" : "#7A5848" }}>Unid.</th>
               <th style={{ ...th, color: orden === "facturacion" ? "#A85D43" : "#7A5848" }}>Facturación</th>
               <th style={th}>Costo</th>
-              <th style={{ ...th, color: orden === "ganancia" ? "#A85D43" : "#7A5848" }}>Ganancia</th>
-              <th style={th}>Margen</th>
+              <th style={{ ...th, color: orden === "ganancia" ? "#A85D43" : "#7A5848" }}>Ganancia $</th>
+              <th style={{ ...th, color: orden === "margen" ? "#A85D43" : "#7A5848" }}>Margen %</th>
+              <th style={{ ...th, color: orden === "porUnidad" ? "#A85D43" : "#7A5848" }}>$/prenda</th>
             </tr>
           </thead>
           <tbody>
@@ -805,8 +825,14 @@ function Articulos({ ventaItems, ventas, catalogo, fmtPeso, MESES, getMonthKey }
                   <td style={{ ...td, color: a.ganancia === null ? "#C9B3A8" : a.ganancia >= 0 ? "#10B981" : "#F87171", fontWeight: 600 }}>
                     {a.ganancia === null ? "s/d" : fmtCorto(a.ganancia)}
                   </td>
-                  <td style={{ ...td, fontSize: 11, color: "#7A5848" }}>
+                  <td style={{ ...td, fontSize: 12, fontWeight: orden === "margen" ? 700 : 500,
+                               color: pctMargen === null ? "#C9B3A8"
+                                    : pctMargen >= 40 ? "#10B981" : pctMargen >= 20 ? "#8A5A2B" : "#F87171" }}>
                     {pctMargen === null ? "—" : `${pctMargen}%`}
+                  </td>
+                  <td style={{ ...td, fontSize: 12, color: "#5A3828",
+                               fontWeight: orden === "porUnidad" ? 700 : 500 }}>
+                    {a.ganUnidad === null ? "—" : fmtCorto(a.ganUnidad)}
                   </td>
                 </tr>
               );
