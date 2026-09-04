@@ -1,7 +1,8 @@
 {
   "name": "Criterio Ventas",
   "short_name": "Criterio",
-  "start_url": "/",
+  "start_url": "/criterio-ventas/",
+  "scope": "/criterio-ventas/",
   "display": "standalone",
   "background_color": "#0A0A0F",
   "theme_color": "#F59E0B",

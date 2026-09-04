@@ -227,6 +227,13 @@ function matchearArticulo(codigoLeido, descLeida, catalogo, aliases = {}) {
   return { ...base, estado: "sin_match", score: mejorScore, candidatos: top3 };
 }
 
+// Numero o null, conservando el 0. Number(x) || null pisa el 0 con null.
+const numONull = (x) => {
+  if (x === null || x === undefined || x === "") return null;
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+};
+
 // Arma el costo de una venta y las filas a guardar en venta_items.
 // costoTotal queda en null si algun renglon no se pudo costear, para no inflar la ganancia.
 function costearVenta(extracted, catalogo, aliases) {
@@ -245,8 +252,10 @@ function costearVenta(extracted, catalogo, aliases) {
       articulo_codigo: m.codigo || null,
       descripcion_leida: it.descripcion || null,
       cantidad: cant,
-      precio_unitario: Number(it.precio || 0) || null,
-      total_item: Number(it.total || 0) || null,
+      // `Number(x) || null` convertia un 0 legitimo en null (una bonificacion, por
+      // ejemplo). Solo tiene que ser null lo que realmente no vino o no es numero.
+      precio_unitario: numONull(it.precio),
+      total_item: numONull(it.total),
       costo_unitario: costoUnit,
       estado_match: m.estado,
     };
@@ -984,6 +993,7 @@ function Articulos({ ventaItems, ventas, catalogo, fmtPeso, MESES, getMonthKey }
 
       <p style={{ fontSize: 10, color: "#7A5848", textAlign: "center", margin: 0 }}>
         {agregado.itemsUsados} renglones contados · {agregado.arr.length} artículos distintos
+        {mostrados.length > 40 && ` · la tabla muestra los primeros 40`}
         {agregado.sinCodigo > 0 && ` · ⚠ ${agregado.sinCodigo} renglones sin artículo identificado quedaron afuera`}
       </p>
       {agregado.ventasIncompletas > 0 && (
@@ -1707,9 +1717,11 @@ async function extraerDatosFotoBase64(base64, mediaType) {
     let data;
     try { data = await resp.json(); } catch(e) { lastError = new Error("HTTP " + resp.status); continue; }
     if (resp.status === 429 || (data.error && data.error.code === 429)) {
-      // Rate limited — try next key
+      // Se prueba con la siguiente key. El mensaje esta redactado para que sirva
+      // tambien si esta era la ultima: antes el error final decia "intentando con
+      // otra key...", que suena a esperar cuando en realidad ya no habia mas.
       lastKeyUsed = (lastKeyUsed + 1) % keys.length;
-      lastError = new Error("Cuota excedida, intentando con otra key...");
+      lastError = new Error(`Sin cuota en las ${keys.length} API key(s) de Gemini. Esperá un rato o agregá otra key en Config.`);
       continue;
     }
     if (!resp.ok || data.error) {
@@ -1782,10 +1794,13 @@ function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias, 
   const items = extracted.items || [];
 
   const hayCat = catalogo && catalogo.length > 0;
-  const conMatch = items.map(it => ({
+  // useMemo: cada renglon se compara contra TODO el catalogo (526 articulos), asi que
+  // un remito de 20 renglones son ~10.000 comparaciones de texto. Sin esto se rehacian
+  // en cada renderizado, o sea con cada letra que se escribe en el buscador.
+  const conMatch = React.useMemo(() => items.map(it => ({
     it,
     m: hayCat ? matchearArticulo(it.codigo, it.descripcion, catalogo, aliases || {}) : null
-  }));
+  })), [items, catalogo, aliases, hayCat]);
   const visible = expanded ? conMatch : conMatch.slice(0, 3);
 
   const ESTILO = {
@@ -2773,7 +2788,7 @@ function Historial({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
   const [filtroMes, setFiltroMes] = useState("all");
   const [busqueda, setBusqueda] = useState("");
 
-  const allMonthKeys = [...new Set(ventas.map(v => getMonthKey(v.fecha)))].sort().reverse();
+  const allMonthKeys = [...new Set(ventas.map(v => getMonthKey(v.fecha)))].filter(Boolean).sort().reverse();
   const anios = [...new Set(allMonthKeys.map(m => m.split("-")[0]))].sort().reverse();
   const mesesDelAnio = filtroAnio === "all"
     ? [...new Set(allMonthKeys.map(m => m.split("-")[1]))]
@@ -2915,22 +2930,27 @@ function Comparar({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
   const [filtroVendedora, setFiltroVendedora] = React.useState("all");
 
   // Get all available years and months
-  const allMonths = [...new Set(ventas.map(v => getMonthKey(v.fecha)))].sort();
+  const allMonths = [...new Set(ventas.map(v => getMonthKey(v.fecha)))].filter(Boolean).sort();
   const allYears = [...new Set(allMonths.map(m => m.split("-")[0]))].sort();
 
+  // Con pocos meses de historia, los indices se iban fuera del array y los selectores
+  // quedaban en blanco. mesEn() recorta el indice a lo que realmente existe.
+  const mesEn = (i) => allMonths.length ? allMonths[Math.max(0, Math.min(i, allMonths.length - 1))] : "";
+  const mitad = Math.floor(allMonths.length / 2);
+
   // Mes vs Mes state
-  const [mes1, setMes1] = React.useState(allMonths[allMonths.length - 1] || "");
-  const [mes2, setMes2] = React.useState(allMonths[allMonths.length - 2] || "");
+  const [mes1, setMes1] = React.useState(mesEn(allMonths.length - 1));
+  const [mes2, setMes2] = React.useState(mesEn(allMonths.length - 2));
 
   // Año vs Año state
   const [anio1, setAnio1] = React.useState(allYears[allYears.length - 1] || "");
   const [anio2, setAnio2] = React.useState(allYears[allYears.length - 2] || allYears[allYears.length - 1] || "");
 
   // Rango vs Rango state
-  const [rangoA1, setRangoA1] = React.useState(allMonths[0] || "");
-  const [rangoA2, setRangoA2] = React.useState(allMonths[Math.floor(allMonths.length/2) - 1] || "");
-  const [rangoB1, setRangoB1] = React.useState(allMonths[Math.floor(allMonths.length/2)] || "");
-  const [rangoB2, setRangoB2] = React.useState(allMonths[allMonths.length - 1] || "");
+  const [rangoA1, setRangoA1] = React.useState(mesEn(0));
+  const [rangoA2, setRangoA2] = React.useState(mesEn(mitad - 1));
+  const [rangoB1, setRangoB1] = React.useState(mesEn(mitad));
+  const [rangoB2, setRangoB2] = React.useState(mesEn(allMonths.length - 1));
 
   const getTotal = (ventasFiltradas) => ventasFiltradas.reduce((s, v) => s + Number(v.total || 0), 0);
 
@@ -3052,7 +3072,7 @@ function Comparar({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
       </div>
 
       {/* Mes vs Mes */}
-      {modo === "mes" && (
+      {allMonths.length > 0 && modo === "mes" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div className="grid2">
             <div>
@@ -3113,7 +3133,7 @@ function Comparar({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
       )}
 
       {/* Año vs Año */}
-      {modo === "anio" && (
+      {allMonths.length > 0 && modo === "anio" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div className="grid2">
             <div>
@@ -3134,7 +3154,7 @@ function Comparar({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
       )}
 
       {/* Rango vs Rango */}
-      {modo === "rango" && (
+      {allMonths.length > 0 && modo === "rango" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <p style={{ fontSize: 12, fontWeight: 600, color: "#2C1A14" }}>Período A</p>
