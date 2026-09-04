@@ -309,13 +309,21 @@ async function traerCatalogoCostos() {
 }
 
 // Fuzzy matching para nombres de clientes
+const escapeRe = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 function similaridad(a, b) {
   a = a.toLowerCase().trim();
   b = b.toLowerCase().trim();
   if (a === b) return 1;
-  if (a.includes(b) || b.includes(a)) return 0.9;
   const longer = a.length > b.length ? a : b;
   const shorter = a.length > b.length ? b : a;
+  // "uno contiene al otro" vale 0.9, pero SOLO si lo contenido es una palabra entera
+  // y de 5 letras para arriba. Sin esto "ana" daba 0.9 contra "analia" y "paula"
+  // contra "paul", y el cliente nuevo heredaba la vendedora de otro sin que se note.
+  // El minimo de 5 saca los nombres cortos, que son los que dan falsos positivos:
+  // con 4 alcanzaba para que "rosa" enganchara con "marcela de santa rosa".
+  if (shorter.length >= 5 &&
+      new RegExp(`(^|\\s)${escapeRe(shorter)}(\\s|$)`).test(longer)) return 0.9;
   let matches = 0;
   for (let i = 0; i < shorter.length; i++) {
     if (longer.includes(shorter[i])) matches++;
@@ -323,20 +331,54 @@ function similaridad(a, b) {
   return matches / longer.length;
 }
 
+// Parecido pensado para nombres: combina el char-a-char con match por palabras
+// (asi "tamara san luis" engancha con "tani san wuis" aunque cambien letras)
+function parecidoNombre(a, b) {
+  const na = normTexto(a), nb = normTexto(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  const ta = na.split(" ").filter(Boolean), tb = nb.split(" ").filter(Boolean);
+  const usados = new Array(tb.length).fill(false);
+  let hits = 0;
+  ta.forEach(p => {
+    let idx = tb.findIndex((q, i) => !usados[i] && q === p);
+    if (idx === -1) {
+      idx = tb.findIndex((q, i) => {
+        if (usados[i]) return false;
+        const n = Math.min(3, Math.min(p.length, q.length));
+        return n >= 3 && p.slice(0, n) === q.slice(0, n);
+      });
+      if (idx !== -1) { usados[idx] = true; hits += 0.8; return; }
+      idx = tb.findIndex((q, i) => !usados[i] && similaridad(p, q) >= 0.6);
+      if (idx !== -1) { usados[idx] = true; hits += 0.6; return; }
+    } else { usados[idx] = true; hits += 1; }
+  });
+  const porPalabra = (2 * hits) / (ta.length + tb.length);
+  return Math.max(porPalabra, similaridad(na, nb));
+}
+
 function buscarCliente(nombre, clientesObj) {
   if (!nombre) return null;
   const key = nombre.toLowerCase().trim();
   if (clientesObj[key] !== undefined) return clientesObj[key];
-  let mejorMatch = null;
-  let mejorScore = 0.85; // umbral mínimo 85%
+
+  // Todos los que pasan el umbral, no solo el mejor: si dos clientes distintos se
+  // parecen y son de vendedoras distintas, el nombre NO alcanza para decidir y no
+  // se elige ninguno. Es preferible que la persona la elija a mano antes que
+  // asignarle la venta a la vendedora equivocada sin que se note.
+  const candidatos = [];
   for (const k of Object.keys(clientesObj)) {
-    const score = similaridad(key, k);
-    if (score > mejorScore) {
-      mejorScore = score;
-      mejorMatch = clientesObj[k];
-    }
+    const score = parecidoNombre(key, k);
+    if (score >= 0.85) candidatos.push({ vendedora: clientesObj[k], score });
   }
-  return mejorMatch;
+  if (!candidatos.length) return null;
+  // Un candidato sin vendedora (null) cuenta como "no se sabe", asi que tambien
+  // frena la asignacion automatica. Es a proposito: preferimos una eleccion manual
+  // de mas antes que adivinar.
+  const vendedorasDistintas = new Set(candidatos.map(c => c.vendedora));
+  if (vendedorasDistintas.size > 1) return null;
+  const elegida = candidatos[0].vendedora;
+  return elegida === null || elegida === undefined ? null : elegida;
 }
 
 
@@ -384,11 +426,13 @@ async function dbInsert(table, row) {
 }
 async function dbDelete(table, id) {
   const { error } = await sb.from(table).delete().eq("id", id);
-  if (error) console.error("delete", table, error);
+  if (error) { console.error("delete", table, error); return { ok: false, error: error.message || JSON.stringify(error) }; }
+  return { ok: true, error: null };
 }
 async function dbUpdate(table, id, updates) {
   const { error } = await sb.from(table).update(updates).eq("id", id);
-  if (error) console.error("update", table, error);
+  if (error) { console.error("update", table, error); return { ok: false, error: error.message || JSON.stringify(error) }; }
+  return { ok: true, error: null };
 }
 
 const { useState, useEffect, useRef } = React;
@@ -561,11 +605,25 @@ function App({ onLogout, rol }) {
     return { ok: true, error: null };
   };
 
+  // Una sola consulta cada 100 ids en vez de una por venta, y el error se devuelve:
+  // antes, si fallaba, las ventas quedaban sin marcar y nadie se enteraba.
   const marcarVentasPagadas = async (ids) => {
-    for (const id of ids) {
-      await dbUpdate("ventas", id, { pagado: true });
+    for (let i = 0; i < ids.length; i += 100) {
+      const lote = ids.slice(i, i + 100);
+      const { error } = await sb.from("ventas").update({ pagado: true }).in("id", lote);
+      if (error) return { ok: false, error: error.message || JSON.stringify(error) };
     }
     setVentas(v => v.map(vt => ids.includes(vt.id) ? { ...vt, pagado: true } : vt));
+    return { ok: true, error: null };
+  };
+
+  // Cambiar el % de comision ahora se guarda. Antes solo cambiaba en pantalla y
+  // volvia al valor viejo al recargar, despues de haber recalculado todo el historial.
+  const cambiarComision = async (vendedoraId, comision) => {
+    const r = await dbUpdate("vendedoras", vendedoraId, { comision: Number(comision) });
+    if (!r.ok) return r;
+    setVendedoras(vs => vs.map(vv => vv.id === vendedoraId ? { ...vv, comision: Number(comision) } : vv));
+    return { ok: true, error: null };
   };
 
   if (loading) return (
@@ -660,7 +718,7 @@ function App({ onLogout, rol }) {
         {!esDeposito && tab === "comparar" && <Comparar ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {!esDeposito && tab === "articulos" && <Articulos ventaItems={ventaItems} ventas={ventas} catalogo={catalogo} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "clientes" && <Clientes vendedoras={vendedoras} esDeposito={esDeposito} />}
-        {!esDeposito && tab === "config" && <Config vendedoras={vendedoras} setVendedoras={setVendedoras} clientes={clientes} setClientes={setClientes} ventas={ventas} setVentas={setVentas} setPagos={setPagos} pagos={pagos} catalogo={catalogo} aliases={aliases} />}
+        {!esDeposito && tab === "config" && <Config vendedoras={vendedoras} setVendedoras={setVendedoras} cambiarComision={cambiarComision} clientes={clientes} setClientes={setClientes} ventas={ventas} setVentas={setVentas} setPagos={setPagos} pagos={pagos} catalogo={catalogo} aliases={aliases} />}
       </div>
     </div>
   );
@@ -925,31 +983,7 @@ function Clientes({ vendedoras, esDeposito }) {
     cargar();
   };
 
-  // Parecido pensado para nombres: combina el char-a-char con match por palabras
-  // (asi "tamara san luis" engancha con "tani san wuis" aunque cambien letras)
-  const parecidoNombre = (a, b) => {
-    const na = normTexto(a), nb = normTexto(b);
-    if (!na || !nb) return 0;
-    if (na === nb) return 1;
-    const ta = na.split(" ").filter(Boolean), tb = nb.split(" ").filter(Boolean);
-    const usados = new Array(tb.length).fill(false);
-    let hits = 0;
-    ta.forEach(p => {
-      let idx = tb.findIndex((q, i) => !usados[i] && q === p);
-      if (idx === -1) {
-        idx = tb.findIndex((q, i) => {
-          if (usados[i]) return false;
-          const n = Math.min(3, Math.min(p.length, q.length));
-          return n >= 3 && p.slice(0, n) === q.slice(0, n);
-        });
-        if (idx !== -1) { usados[idx] = true; hits += 0.8; return; }
-        idx = tb.findIndex((q, i) => !usados[i] && similaridad(p, q) >= 0.6);
-        if (idx !== -1) { usados[idx] = true; hits += 0.6; return; }
-      } else { usados[idx] = true; hits += 1; }
-    });
-    const porPalabra = (2 * hits) / (ta.length + tb.length);
-    return Math.max(porPalabra, similaridad(na, nb));
-  };
+  // parecidoNombre ahora vive arriba, a nivel modulo, para que Nueva Venta use el mismo criterio
 
   // Trae TODOS los nombres escritos en ventas (Supabase corta en 1000 por consulta)
   const traerNombresVentas = async () => {
@@ -1244,7 +1278,16 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
   const totOpsA = sumaAnio(anio, "ops"), totOpsB = sumaAnio(anioAnt, "ops");
   const totGA = sumaAnio(anio, "ganancia"), totGB = sumaAnio(anioAnt, "ganancia");
   const ventasConCosto = MESES.reduce((s, _, i) => s + dm(anio, i).conCosto + dm(anioAnt, i).conCosto, 0);
-  const pctV = pct(totVA, totVB);
+
+  // El % interanual comparaba un anio incompleto contra uno completo: en marzo daba
+  // -70% y no significaba nada. Ahora del anio anterior se toman solo los mismos meses
+  // que ya transcurrieron de este.
+  const corte = anio === anioHoy ? mesHoy : 11;
+  const sumaHasta = (a, campo) => MESES.reduce((s, _, i) => i <= corte ? s + dm(a, i)[campo] : s, 0);
+  const totVBcomp = sumaHasta(anioAnt, "total");
+  const parcial = corte < 11;
+  const rango = parcial ? `ene–${MESES[corte].toLowerCase()}` : "";
+  const pctV = pct(totVA, totVBcomp);
 
   const esFuturo = (a, i) => a === anioHoy && i > mesHoy;
 
@@ -1275,6 +1318,7 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
           {pctV !== null && (
             <span style={{ fontSize: 12, fontWeight: 600, marginLeft: 6, color: pctV >= 0 ? "#10B981" : "#F87171" }}>
               {pctV > 0 ? "+" : ""}{pctV}% vs {anioAnt}
+              {parcial && <span style={{ color: "#7A5848", fontWeight: 500 }}> ({rango}, {fmtPeso(totVBcomp)})</span>}
             </span>
           )}
         </div>
@@ -1441,6 +1485,7 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
 
       <p style={{ fontSize: 10, color: "#7A5848", textAlign: "center", margin: 0 }}>
         Montos en miles (k) y millones (M) · los meses que todavía no llegaron quedan vacíos
+        {parcial && ` · la columna Total de ${anioAnt} es el año completo; el % de arriba compara solo ${rango} contra ${rango}`}
       </p>
     </div>
   );
@@ -1488,9 +1533,20 @@ function Dashboard({ ventas, vendedoras, pagos, currentMes, getComisionMes, getP
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {vendedoras.map(v => {
             const tventa = mesActual.filter(vt => (vt.vendedora_id || vt.vendedoraId) === v.id).reduce((s, vt) => s + Number(vt.total || 0), 0);
-            const comision = tventa > 0 ? getComisionMes(v.id, currentMes) : 0;
-            const pagado = tventa > 0 ? getPagadoMes(v.id, currentMes) : 0;
+            // Sin el `tventa > 0 ?` que habia antes: un pago hecho en un mes sin ventas
+            // quedaba invisible y la vendedora figuraba "al dia" cuando no lo estaba.
+            const comision = getComisionMes(v.id, currentMes);
+            const pagado = getPagadoMes(v.id, currentMes);
             const deuda = comision - pagado;
+            // Arrastre de meses anteriores, con el mismo criterio: comision del mes
+            // menos lo pagado imputado a ese mes. Antes el Dashboard solo miraba el mes
+            // actual y una deuda vieja no se veia en ningun lado.
+            const mesesPrevios = [...new Set([
+              ...ventas.map(vt => getMonthKey(vt.fecha)),
+              ...pagos.map(p => p.mes),
+            ])].filter(mk => mk && mk < currentMes);
+            const arrastre = mesesPrevios.reduce(
+              (s, mk) => s + (getComisionMes(v.id, mk) - getPagadoMes(v.id, mk)), 0);
             return (
               <div key={v.id} style={{ display: "flex", alignItems: "center", gap: 16, padding: "12px 0", borderBottom: "1px solid #1E1E2E" }}>
                 <div style={{ width: 36, height: 36, borderRadius: "50%", background: v.color + "22", border: `2px solid ${v.color}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
@@ -1501,8 +1557,15 @@ function Dashboard({ ventas, vendedoras, pagos, currentMes, getComisionMes, getP
                   <p style={{ fontSize: 12, color: "#5A3828", marginTop: 2 }}>{fmtPeso(tventa)} en ventas</p>
                 </div>
                 <div style={{ textAlign: "right" }}>
-                  <p style={{ fontSize: 13, fontWeight: 700, color: deuda > 0 ? "#F87171" : "#10B981" }}>{fmtPeso(Math.abs(deuda))}</p>
-                  <p style={{ fontSize: 10, color: "#6B4A3E" }}>{deuda > 0 ? "a pagar" : "al día"}</p>
+                  <p style={{ fontSize: 13, fontWeight: 700, color: deuda > 0 ? "#F87171" : deuda < 0 ? "#8A5A2B" : "#10B981" }}>{fmtPeso(Math.abs(deuda))}</p>
+                  <p style={{ fontSize: 10, color: "#6B4A3E" }}>
+                    {deuda > 0 ? "a pagar" : deuda < 0 ? "pagado de más" : "al día"}
+                  </p>
+                  {Math.abs(arrastre) >= 1 && (
+                    <p style={{ fontSize: 10, color: arrastre > 0 ? "#F87171" : "#8A5A2B", fontWeight: 600, marginTop: 2 }}>
+                      {arrastre > 0 ? `+ ${fmtPeso(Math.round(arrastre))} de meses anteriores` : `${fmtPeso(Math.round(Math.abs(arrastre)))} de más, de antes`}
+                    </p>
+                  )}
                 </div>
               </div>
             );
@@ -1975,16 +2038,17 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
     const clienteFinal = real || leido;
     const clienteLower = clienteFinal.toLowerCase().trim();
     const vendedoraIdAuto = buscarCliente(clienteLower, clientes) || "";
-    // El total que se guarda es solo la mercaderia; si vino con saldo sumado, se descuenta
-    let totalFinal = extracted?.totalConDescuento ?? extracted?.total ?? "";
+    // El saldo anterior YA NO se resta solo. La condicion que habia ("el total leido es
+    // mayor que la suma de los renglones") erraba en las dos direcciones: con descuento
+    // no restaba cuando debia (y la deuda vieja se guardaba como venta), y con un renglon
+    // mal leido restaba cuando no debia (y la venta quedaba corta). Ahora se muestra el
+    // saldo y lo decide la persona, que tiene la foto delante.
+    const totalFinal = extracted?.totalConDescuento ?? extracted?.total ?? "";
     const saldo = Number(extracted?.saldoAnterior || 0);
-    const sumaIt = (extracted?.items || []).reduce((s, it) => s + Number(it.total || 0), 0);
-    if (saldo > 0 && Number(totalFinal) > 0 && sumaIt > 0 && Number(totalFinal) > sumaIt) {
-      totalFinal = Number(totalFinal) - saldo;
-    }
     return {
       cliente: clienteFinal || prevForm?.cliente || "",
       _clienteLeido: real ? leido : null,
+      _saldoAnterior: saldo > 0 ? saldo : null,
       vendedoraId: vendedoraIdAuto ? String(vendedoraIdAuto) : (prevForm?.vendedoraId || ""),
       total: totalFinal !== null && totalFinal !== undefined && totalFinal !== "" ? totalFinal : (prevForm?.total || ""),
       fecha: fechaLote(),
@@ -2060,7 +2124,9 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
     setSaveError(null);
 
     const cost = costearVenta(item.extracted, catalogo, aliases);
-    const { _clienteLeido, ...formLimpio } = item.form;
+    // Los campos con _ son de pantalla, no columnas de la tabla: si se mandan,
+    // Supabase rechaza el insert entero.
+    const { _clienteLeido, _saldoAnterior, ...formLimpio } = item.form;
     const r = await addVenta({
       ...formLimpio,
       vendedoraId: Number(item.form.vendedoraId),
@@ -2300,6 +2366,36 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
                 </div>
               </div>
 
+              {/* El saldo anterior no se resta solo: se muestra y lo decide la persona */}
+              {activeItem.form._saldoAnterior > 0 && (
+                <div style={{ background: "#FFF4E6", border: "1px solid #E8C4B0", borderRadius: 8, padding: "10px 12px" }}>
+                  <p style={{ fontSize: 12, color: "#8A5A2B", fontWeight: 600, margin: 0 }}>
+                    ⚠ El remito trae un saldo/deuda anterior de {fmtPeso(activeItem.form._saldoAnterior)}
+                  </p>
+                  <p style={{ fontSize: 11, color: "#7A5848", margin: "4px 0 8px 0" }}>
+                    Esa plata no es venta de este remito. Mirá la foto: si el total de arriba
+                    ({fmtPeso(Number(activeItem.form.total || 0))}) <b>ya lo incluye</b>, restalo. Si el total
+                    es solo la mercadería, dejalo como está.
+                  </p>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <button onClick={() => {
+                        const nuevo = Number(activeItem.form.total || 0) - Number(activeItem.form._saldoAnterior);
+                        updateForm(activeIdx, "total", String(nuevo));
+                        updateForm(activeIdx, "_saldoAnterior", null);
+                      }}
+                      style={{ background: "#A85D43", color: "#fff", border: "none", borderRadius: 6,
+                               padding: "5px 11px", fontSize: 11, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
+                      Restar {fmtPeso(activeItem.form._saldoAnterior)} → queda {fmtPeso(Number(activeItem.form.total || 0) - Number(activeItem.form._saldoAnterior))}
+                    </button>
+                    <button onClick={() => updateForm(activeIdx, "_saldoAnterior", null)}
+                      style={{ background: "#FFF8F5", color: "#5A3828", border: "1px solid #D4A090", borderRadius: 6,
+                               padding: "5px 11px", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>
+                      El total ya está bien
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label style={{ fontSize: 12, color: "#5A3828", marginBottom: 6, display: "block" }}>Nota (opcional)</label>
                 <input className="input" value={activeItem.form.nota}
@@ -2401,22 +2497,73 @@ function Comisiones({ ventas, vendedoras, pagos, addPago, marcarVentasPagadas, c
   const [checklist, setChecklist] = useState(null); // vendedoraId o null
   const [seleccionadas, setSeleccionadas] = useState([]);
   const [guardando, setGuardando] = useState(false);
+  const [errorPago, setErrorPago] = useState(null);
+
+  const nombreMes = (mk) => {
+    if (!mk) return "sin fecha";
+    const [y, m] = mk.split("-");
+    return `${MESES[parseInt(m, 10) - 1]} ${y}`;
+  };
 
   const toggleVenta = (id) => {
     setSeleccionadas(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
   };
 
+  // La comision pertenece al mes de las VENTAS. Antes el pago se anotaba siempre con
+  // el mes de hoy, asi que pagar en septiembre las ventas de agosto dejaba agosto
+  // eternamente impago y septiembre sobrepagado.
+  const desglosePorMes = (vendedora) => {
+    const ventasSel = ventas.filter(vt => seleccionadas.includes(vt.id));
+    const porMes = {};
+    let sinFecha = 0;
+    ventasSel.forEach(vt => {
+      const mk = getMonthKey(vt.fecha);
+      if (!mk) { sinFecha++; return; }
+      if (!porMes[mk]) porMes[mk] = { mes: mk, totalVentas: 0, ops: 0 };
+      porMes[mk].totalVentas += Number(vt.total || 0);
+      porMes[mk].ops += 1;
+    });
+    const filas = Object.values(porMes)
+      .map(f => ({ ...f, comision: f.totalVentas * vendedora.comision / 100 }))
+      .sort((a, b) => a.mes.localeCompare(b.mes));
+    return { filas, sinFecha };
+  };
+
   const handlePagarSeleccionadas = async (vendedora) => {
     if (seleccionadas.length === 0) return;
     setGuardando(true);
-    const ventasSel = ventas.filter(vt => seleccionadas.includes(vt.id));
-    const totalVentas = ventasSel.reduce((s, vt) => s + Number(vt.total || 0), 0);
-    const montoComision = totalVentas * vendedora.comision / 100;
-    await marcarVentasPagadas(seleccionadas);
-    await addPago(vendedora.id, montoComision, currentMes);
+    setErrorPago(null);
+
+    const { filas, sinFecha } = desglosePorMes(vendedora);
+    if (sinFecha > 0) {
+      setErrorPago(`${sinFecha} venta(s) seleccionada(s) no tienen fecha, así que no se sabe a qué mes imputarlas. Sacalas de la selección.`);
+      setGuardando(false);
+      return;
+    }
+    if (!filas.length) { setGuardando(false); return; }
+
+    // Un registro de pago por cada mes. Los pagos se hacen ANTES de marcar las ventas:
+    // si algo falla, quedan ventas sin marcar (visible y corregible) en vez de ventas
+    // marcadas como pagadas sin que exista el pago.
+    const fallidos = [];
+    for (const f of filas) {
+      const r = await addPago(vendedora.id, f.comision, f.mes);
+      if (!r.ok) fallidos.push(`${f.mes}: ${r.error}`);
+    }
+    if (fallidos.length) {
+      setErrorPago("No se registró el pago de " + fallidos.join(" · ") + ". Las ventas NO se marcaron como pagadas.");
+      setGuardando(false);
+      return;
+    }
+
+    const rm = await marcarVentasPagadas(seleccionadas);
+    setGuardando(false);
+    if (!rm.ok) {
+      setErrorPago("El pago quedó registrado, pero no se pudieron marcar las ventas como pagadas: " + rm.error + ". Volvé a intentarlo o van a aparecer como pendientes de nuevo.");
+      return;
+    }
     setChecklist(null);
     setSeleccionadas([]);
-    setGuardando(false);
   };
 
   return (
@@ -2489,21 +2636,47 @@ function Comisiones({ ventas, vendedoras, pagos, addPago, marcarVentasPagadas, c
                   );
                 })}
 
-                {seleccionadas.length > 0 && (
-                  <div style={{ background: "#FFF0E8", borderRadius: 8, padding: 10, marginTop: 10, marginBottom: 8 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 700 }}>
-                      <span>Comisión a registrar</span>
-                      <span style={{ color: v.color }}>{fmtPeso(montoSeleccionado)}</span>
+                {seleccionadas.length > 0 && (() => {
+                  const { filas, sinFecha } = desglosePorMes(v);
+                  return (
+                    <div style={{ background: "#FFF0E8", borderRadius: 8, padding: 10, marginTop: 10, marginBottom: 8 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 700 }}>
+                        <span>Comisión a registrar</span>
+                        <span style={{ color: v.color }}>{fmtPeso(montoSeleccionado)}</span>
+                      </div>
+                      <p style={{ fontSize: 11, color: "#7A5848", marginTop: 2 }}>{seleccionadas.length} ventas seleccionadas</p>
+
+                      {/* Se ve el desglose ANTES de confirmar: cada mes se registra por separado */}
+                      <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #E8C4B0" }}>
+                        <p style={{ fontSize: 10, color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                          {filas.length > 1 ? `Se van a registrar ${filas.length} pagos, uno por mes` : "Se imputa al mes de las ventas"}
+                        </p>
+                        {filas.map(f => (
+                          <div key={f.mes} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "2px 0" }}>
+                            <span style={{ color: "#5A3828" }}>{nombreMes(f.mes)} <span style={{ color: "#9A7570" }}>· {f.ops} vta{f.ops !== 1 ? "s" : ""}</span></span>
+                            <span style={{ color: v.color, fontWeight: 600 }}>{fmtPeso(f.comision)}</span>
+                          </div>
+                        ))}
+                        {sinFecha > 0 && (
+                          <p style={{ fontSize: 11, color: "#B3261E", fontWeight: 600, marginTop: 4 }}>
+                            ⚠ {sinFecha} venta(s) sin fecha — no se sabe a qué mes van. Sacalas de la selección.
+                          </p>
+                        )}
+                      </div>
                     </div>
-                    <p style={{ fontSize: 11, color: "#7A5848", marginTop: 2 }}>{seleccionadas.length} ventas seleccionadas</p>
-                  </div>
+                  );
+                })()}
+
+                {errorPago && (
+                  <p style={{ fontSize: 12, color: "#B3261E", fontWeight: 600, margin: "0 0 8px 0",
+                              background: "#FFE8E4", borderRadius: 8, padding: "8px 10px" }}>{errorPago}</p>
                 )}
 
                 <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                   <button className="btn btn-primary btn-sm" onClick={() => handlePagarSeleccionadas(v)} disabled={seleccionadas.length === 0 || guardando} style={{ flex: 1, opacity: seleccionadas.length === 0 ? 0.5 : 1 }}>
                     {guardando ? "Guardando..." : `Registrar pago (${seleccionadas.length})`}
                   </button>
-                  <button onClick={() => { setChecklist(null); setSeleccionadas([]); }} style={{ background: "#FFF8F5", border: "1px solid #C4A090", borderRadius: 8, color: "#5A3828", padding: "6px 14px", cursor: "pointer", fontSize: 12 }}>✕</button>
+                  <button onClick={() => { setChecklist(null); setSeleccionadas([]); setErrorPago(null); }} style={{ background: "#FFF8F5", border: "1px solid #C4A090", borderRadius: 8, color: "#5A3828", padding: "6px 14px", cursor: "pointer", fontSize: 12 }}>✕</button>
                 </div>
               </div>
             )}
@@ -2512,7 +2685,7 @@ function Comisiones({ ventas, vendedoras, pagos, addPago, marcarVentasPagadas, c
             {checklist !== v.id && (
               <button
                 className="btn btn-primary btn-sm"
-                onClick={() => { setChecklist(v.id); setSeleccionadas([]); }}
+                onClick={() => { setChecklist(v.id); setSeleccionadas([]); setErrorPago(null); }}
                 style={{ width: "100%", opacity: hayPendientes ? 1 : 0.5 }}
               >
                 {hayPendientes ? `Registrar pago (${ventasPendientes.length} pendientes)` : "Sin comisiones pendientes"}
@@ -2969,10 +3142,21 @@ function Comparar({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
 }
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
-function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setVentas, setPagos, catalogo, aliases }) {
+function Config({ vendedoras, setVendedoras, cambiarComision, clientes, setClientes, ventas, setVentas, setPagos, catalogo, aliases }) {
   const [nueva, setNueva] = useState({ nombre: "", comision: "", color: "#8B5CF6" });
   const [editId, setEditId] = useState(null);
   const [editComision, setEditComision] = useState("");
+  const [errorComision, setErrorComision] = useState(null);
+  const [guardandoComision, setGuardandoComision] = useState(false);
+
+  const guardarComision = async (id) => {
+    setGuardandoComision(true);
+    setErrorComision(null);
+    const r = await cambiarComision(id, editComision);
+    setGuardandoComision(false);
+    if (!r.ok) { setErrorComision("No se pudo guardar: " + r.error); return; }
+    setEditId(null);
+  };
 
   const addVendedora = async () => {
     if (!nueva.nombre || !nueva.comision) return;
@@ -3300,7 +3484,8 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
               <>
                 <input className="input" type="number" value={editComision} onChange={e => setEditComision(e.target.value)} style={{ width: 70 }} />
                 <span style={{ fontSize: 12, color: "#5A3828" }}>%</span>
-                <button className="btn btn-primary btn-sm" onClick={() => { setVendedoras(vs => vs.map(vv => vv.id === v.id ? { ...vv, comision: Number(editComision) } : vv)); setEditId(null); }}>✓</button>
+                <button className="btn btn-primary btn-sm" disabled={guardandoComision}
+                  onClick={() => guardarComision(v.id)}>{guardandoComision ? "..." : "✓"}</button>
               </>
             ) : (
               <>
@@ -3310,6 +3495,16 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
             )}
           </div>
         ))}
+        {errorComision && (
+          <p style={{ fontSize: 12, color: "#B3261E", fontWeight: 600, marginTop: 10, background: "#FFE8E4", borderRadius: 8, padding: "8px 10px" }}>
+            {errorComision}
+          </p>
+        )}
+        <p style={{ fontSize: 11, color: "#8A5A2B", marginTop: 10 }}>
+          ⚠ El % se aplica a <b>todo el historial</b>, no solo de acá en adelante: si lo cambiás,
+          las comisiones de los meses anteriores se recalculan con el valor nuevo.
+        </p>
+
         <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
           <input className="input" value={nueva.nombre} onChange={e => setNueva(n => ({ ...n, nombre: e.target.value }))} placeholder="Nombre" style={{ flex: 1, minWidth: 100 }} />
           <input className="input" type="number" value={nueva.comision} onChange={e => setNueva(n => ({ ...n, comision: e.target.value }))} placeholder="%" style={{ width: 70 }} />
@@ -3329,7 +3524,12 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
                 <span style={{ textTransform: "capitalize" }}>{nombre}</span>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ color: v?.color || "#5A3828", fontSize: 12 }}>{v?.nombre || "?"}</span>
-                  <button onClick={() => setClientes(c => { const nc = { ...c }; delete nc[nombre]; return nc; })} style={{ background: "none", border: "none", color: "#F87171", cursor: "pointer", fontSize: 16, lineHeight: 1 }}>×</button>
+                  <button onClick={async () => {
+                      if (!window.confirm(`¿Desvincular a "${nombre}" de su vendedora?\n\nSe borra el vínculo cliente↔vendedora. Las ventas ya cargadas no se tocan.`)) return;
+                      const { error } = await sb.from("clientes").delete().eq("nombre", nombre);
+                      if (error) { window.alert("No se pudo borrar: " + error.message); return; }
+                      setClientes(c => { const nc = { ...c }; delete nc[nombre]; return nc; });
+                    }} style={{ background: "none", border: "none", color: "#F87171", cursor: "pointer", fontSize: 16, lineHeight: 1 }}>×</button>
                 </div>
               </div>
             );
@@ -3337,12 +3537,18 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
         </div>
       </div>
 
-      <div className="card" style={{ borderColor: "#F8717133" }}>
-        <p style={{ fontSize: 11, color: "#F87171", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>Zona peligrosa</p>
-        <button onClick={() => { if (window.confirm("¿Borrar TODOS los datos?")) { setVentas([]); setPagos([]); setClientes({}); } }}
-          style={{ background: "#F8717122", border: "1px solid #F87171", borderRadius: 8, color: "#F87171", padding: "8px 16px", cursor: "pointer", fontSize: 13, fontFamily: "'DM Sans',sans-serif" }}>
-          Borrar todos los datos
+      {/* Este boton NUNCA borro nada de la base: solo vaciaba la pantalla. Decia
+          "Borrar todos los datos" y al recargar volvia todo, lo cual es un susto
+          innecesario. Ahora dice lo que realmente hace. */}
+      <div className="card">
+        <p style={{ fontSize: 11, color: "#6B4A3E", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>Pantalla</p>
+        <button onClick={() => { setVentas([]); setPagos([]); setClientes({}); }}
+          style={{ background: "#FFF8F5", border: "1px solid #D4A090", borderRadius: 8, color: "#5A3828", padding: "8px 16px", cursor: "pointer", fontSize: 13, fontFamily: "'DM Sans',sans-serif" }}>
+          Vaciar la pantalla
         </button>
+        <p style={{ fontSize: 11, color: "#7A5848", marginTop: 8 }}>
+          Limpia lo que se ve, sin tocar la base. Recargá la página y vuelve todo.
+        </p>
       </div>
     </div>
   );
