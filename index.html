@@ -361,7 +361,7 @@ async function dbGetAll(table) {
       if (row.fecha) {
         // If Date object, convert to YYYY-MM-DD string
         if (row.fecha instanceof Date) {
-          row.fecha = row.fecha.toISOString().substring(0, 10);
+          row.fecha = hoyLocal(row.fecha);
         } else {
           row.fecha = String(row.fecha).substring(0, 10);
         }
@@ -370,10 +370,17 @@ async function dbGetAll(table) {
   }
   return data || [];
 }
+// Devuelve { row, error }. El error NO se puede tragar: quien llama tiene que
+// mostrarlo, porque si no la venta se pierde y la pantalla dice que se guardo.
 async function dbInsert(table, row) {
   const { data, error } = await sb.from(table).insert([row]).select();
-  if (error) console.error("insert", table, error);
-  return data?.[0];
+  if (error) {
+    console.error("insert", table, error);
+    return { row: null, error: error.message || JSON.stringify(error) };
+  }
+  const guardada = data?.[0] || null;
+  if (!guardada) return { row: null, error: "Supabase no devolvio la fila guardada" };
+  return { row: guardada, error: null };
 }
 async function dbDelete(table, id) {
   const { error } = await sb.from(table).delete().eq("id", id);
@@ -411,6 +418,13 @@ function getMonthKey(date) {
   }
   // Fallback: slice string directly to avoid timezone issues
   return String(date).substring(0, 7);
+}
+
+// Fecha de HOY en horario local. NO usar toISOString(): devuelve UTC, y despues de
+// las 21hs de Argentina ya es el dia siguiente, con lo cual las ventas cargadas de
+// noche a fin de mes caian en el mes equivocado.
+function hoyLocal(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function App({ onLogout, rol }) {
@@ -494,32 +508,45 @@ function App({ onLogout, rol }) {
     loadData();
   }, []);
 
+  // Devuelve { ok, error, avisos }. Quien la llama TIENE que mirar el ok antes de
+  // decirle a la persona que la venta se guardo.
   const addVenta = async (venta) => {
     const { vendedoraId, _itemsCosto, ...rest } = venta;
-    const row = { ...rest, vendedora_id: vendedoraId, fecha: venta.fecha || new Date().toISOString().split("T")[0] };
-    const saved = await dbInsert("ventas", row);
-    if (saved) setVentas(v => [saved, ...v]);
+    const row = { ...rest, vendedora_id: vendedoraId, fecha: venta.fecha || hoyLocal() };
+    const { row: saved, error } = await dbInsert("ventas", row);
+    if (error || !saved) return { ok: false, error: error || "No se pudo guardar", avisos: [] };
+    setVentas(v => [saved, ...v]);
+
+    // De aca en adelante la venta YA esta guardada. Si algo de esto falla, no se
+    // pierde la venta, pero hay que avisarlo igual para que no quede incompleta en silencio.
+    const avisos = [];
 
     // Detalle por articulo, para poder auditar el costo despues.
-    // Si la tabla no existe todavia, la venta igual queda guardada.
-    if (saved && _itemsCosto && _itemsCosto.length) {
+    if (_itemsCosto && _itemsCosto.length) {
       try {
         const filas = _itemsCosto.map(f => ({ ...f, venta_id: saved.id }));
-        const { error } = await sb.from("venta_items").insert(filas);
-        if (error) console.warn("venta_items no guardado:", error.message);
-      } catch (e) { console.warn("venta_items no guardado", e); }
+        const { error: eIt } = await sb.from("venta_items").insert(filas);
+        if (eIt) avisos.push("La venta se guardo, pero el detalle por articulo no: " + (eIt.message || ""));
+      } catch (e) { avisos.push("La venta se guardo, pero el detalle por articulo no."); }
     }
     if (venta.cliente && venta.vendedoraId) {
       const clienteKey = venta.cliente.toLowerCase().trim();
-      await sb.from("clientes").upsert([{ nombre: clienteKey, vendedora_id: venta.vendedoraId }], { onConflict: "nombre" });
-      setClientes(c => ({ ...c, [clienteKey]: venta.vendedoraId }));
+      const { error: eCli } = await sb.from("clientes")
+        .upsert([{ nombre: clienteKey, vendedora_id: venta.vendedoraId }], { onConflict: "nombre" });
+      if (eCli) avisos.push("La venta se guardo, pero no se pudo vincular el cliente con la vendedora.");
+      else setClientes(c => ({ ...c, [clienteKey]: venta.vendedoraId }));
     }
+    return { ok: true, error: null, avisos };
   };
 
+  // `mes` = el mes al que corresponde la comision (el mes de las ventas).
+  // `fecha` = el dia en que se pago de verdad. Son dos cosas distintas.
   const addPago = async (vendedoraId, monto, mes) => {
-    const row = { vendedora_id: vendedoraId, monto: Number(monto), mes, fecha: new Date().toISOString().split("T")[0] };
-    const saved = await dbInsert("pagos", row);
-    if (saved) setPagos(p => [...p, { ...saved, vendedoraId: saved.vendedora_id }]);
+    const row = { vendedora_id: vendedoraId, monto: Number(monto), mes, fecha: hoyLocal() };
+    const { row: saved, error } = await dbInsert("pagos", row);
+    if (error || !saved) return { ok: false, error: error || "No se pudo registrar el pago" };
+    setPagos(p => [...p, { ...saved, vendedoraId: saved.vendedora_id }]);
+    return { ok: true, error: null };
   };
 
   // Guarda que tal descripcion escrita a mano corresponde a tal articulo.
@@ -1894,18 +1921,30 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
   const [savedCount, setSavedCount] = useState(0);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualSaved, setManualSaved] = useState(false);
-  const processingRef = useRef(false);
+  const [guardandoIdx, setGuardandoIdx] = useState(null);
+  const [saveError, setSaveError] = useState(null);
+  const [manualError, setManualError] = useState(null);
   const [fotoAmpliada, setFotoAmpliada] = useState(null);
   const [zoom, setZoom] = useState(1);
 
   // ── Mes del lote que se está cargando ──
   const MESES_N = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
-  const hoyStr = () => new Date().toISOString().split("T")[0];
+  const hoyStr = () => hoyLocal();
   const mesActualKey = hoyStr().substring(0, 7);
   const [mesLote, setMesLote] = useState(mesActualKey);
 
   // Si el lote es del mes actual usa el día de hoy; si es de un mes anterior usa el día 15
   const fechaLote = (mk = mesLote) => mk === mesActualKey ? hoyStr() : `${mk}-15`;
+
+  // La fecha se le estampa a cada foto cuando entra a la cola. Si se cambia el mes
+  // DESPUES de cargarlas, hay que re-estampar las que todavia no se guardaron: si no,
+  // el cartel dice una fecha y se guarda otra.
+  const cambiarMesLote = (mk) => {
+    setMesLote(mk);
+    const nuevaFecha = fechaLote(mk);
+    setQueue(q => q.map(it => ({ ...it, form: { ...it.form, fecha: nuevaFecha } })));
+    setManualForm(f => ({ ...f, fecha: nuevaFecha }));
+  };
 
   // Últimos 4 meses como opciones
   const opcionesMes = (() => {
@@ -1920,7 +1959,9 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
     return out;
   })();
 
-  const [manualForm, setManualForm] = useState({ cliente: "", vendedoraId: "", total: "", fecha: hoyStr(), nota: "" });
+  // Arranca con la fecha del lote elegido, igual que las fotos (antes usaba siempre hoy
+  // y la carga manual ignoraba el selector de mes).
+  const [manualForm, setManualForm] = useState({ cliente: "", vendedoraId: "", total: "", fecha: fechaLote(), nota: "" });
 
   const defaultForm = () => ({
     cliente: "", vendedoraId: "", total: "",
@@ -2009,20 +2050,33 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
     setQueue(q => q.map((it, i) => i === idx ? { ...it, form: { ...it.form, [field]: value } } : it));
   };
 
-  const saveItem = (idx) => {
+  // La foto sale de la cola SOLO si Supabase confirmo que guardo. Antes se sacaba
+  // siempre y se sumaba al contador, asi que un error de red borraba la venta sin aviso.
+  const saveItem = async (idx) => {
     const item = queue[idx];
-    if (!item.form.vendedoraId || !item.form.total) return;
+    if (!item || !item.form.vendedoraId || !item.form.total) return;
+    if (guardandoIdx !== null) return;
+    setGuardandoIdx(idx);
+    setSaveError(null);
+
     const cost = costearVenta(item.extracted, catalogo, aliases);
     const { _clienteLeido, ...formLimpio } = item.form;
-    addVenta({
+    const r = await addVenta({
       ...formLimpio,
       vendedoraId: Number(item.form.vendedoraId),
       total: Number(item.form.total),
       costo_total: cost.costoTotal,
       _itemsCosto: cost.filas,
     });
+
+    setGuardandoIdx(null);
+    if (!r.ok) {
+      setSaveError("NO se guardó: " + r.error + " — la foto sigue acá, probá de nuevo.");
+      return;
+    }
+    if (r.avisos.length) setSaveError("⚠ " + r.avisos.join(" · "));
     setQueue(q => {
-      const next = q.filter((_, i) => i !== idx);
+      const next = q.filter(it => it.id !== item.id);
       setActiveIdx(next.length > 0 ? 0 : null);
       return next;
     });
@@ -2040,6 +2094,9 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
   const retryItem = (idx) => {
     setQueue(q => q.map((it, i) => i === idx ? { ...it, status: "pending", errorMsg: null } : it));
   };
+
+  // Al cambiar de foto se limpia el aviso de guardado, que era de la foto anterior
+  const irAFoto = (idx) => { setActiveIdx(idx); setSaveError(null); };
 
   const activeItem = activeIdx !== null && queue[activeIdx] ? queue[activeIdx] : null;
   const pendingCount = queue.filter(i => i.status === "pending" || i.status === "processing").length;
@@ -2108,12 +2165,13 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
         {/* Mes del lote */}
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #E8C4B0" }}>
           <label style={{ fontSize: 12, color: "#5A3828", marginBottom: 6, display: "block" }}>Mes de estas ventas</label>
-          <select className="input" value={mesLote} onChange={e => setMesLote(e.target.value)} style={{ maxWidth: 220, margin: "0 auto" }}>
+          <select className="input" value={mesLote} onChange={e => cambiarMesLote(e.target.value)} style={{ maxWidth: 220, margin: "0 auto" }}>
             {opcionesMes.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
           </select>
           {mesLote !== mesActualKey && (
             <p style={{ fontSize: 12, color: "#A85D43", fontWeight: 600, marginTop: 8 }}>
               ⚠ Cargando ventas de {opcionesMes.find(o => o.key === mesLote)?.label} — se guardarán con fecha {fechaLote()}
+              {queue.length > 0 ? ` (ya aplicado a las ${queue.length} fotos en cola)` : ""}
             </p>
           )}
         </div>
@@ -2126,7 +2184,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
           {/* Miniaturas */}
           <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 8, marginBottom: 16 }}>
             {queue.map((item, idx) => (
-              <div key={item.id} onClick={() => setActiveIdx(idx)}
+              <div key={item.id} onClick={() => irAFoto(idx)}
                 style={{ position: "relative", flexShrink: 0, width: 64, height: 64, borderRadius: 8, overflow: "hidden", cursor: "pointer",
                   border: `2px solid ${activeIdx === idx ? "#A85D43" : item.status === "done" ? "#10B981" : item.status === "error" ? "#F87171" : "#D4A090"}`,
                   transition: "border 0.2s" }}>
@@ -2158,8 +2216,8 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
                   Foto {activeIdx + 1} de {queue.length}
                 </p>
                 <div style={{ display: "flex", gap: 6 }}>
-                  {activeIdx > 0 && <button onClick={() => setActiveIdx(i => i - 1)} style={{ background: "#FFF8F5", border: "1px solid #2A2A3E", borderRadius: 6, color: "#5A3828", padding: "4px 10px", cursor: "pointer", fontSize: 12 }}>← Ant</button>}
-                  {activeIdx < queue.length - 1 && <button onClick={() => setActiveIdx(i => i + 1)} style={{ background: "#FFF8F5", border: "1px solid #2A2A3E", borderRadius: 6, color: "#5A3828", padding: "4px 10px", cursor: "pointer", fontSize: 12 }}>Sig →</button>}
+                  {activeIdx > 0 && <button onClick={() => irAFoto(activeIdx - 1)} style={{ background: "#FFF8F5", border: "1px solid #2A2A3E", borderRadius: 6, color: "#5A3828", padding: "4px 10px", cursor: "pointer", fontSize: 12 }}>← Ant</button>}
+                  {activeIdx < queue.length - 1 && <button onClick={() => irAFoto(activeIdx + 1)} style={{ background: "#FFF8F5", border: "1px solid #2A2A3E", borderRadius: 6, color: "#5A3828", padding: "4px 10px", cursor: "pointer", fontSize: 12 }}>Sig →</button>}
                 </div>
               </div>
 
@@ -2190,7 +2248,10 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
                     </div>
                   )}
                   {activeItem.extracted && (
-                    <ItemsDetectados extracted={activeItem.extracted} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} totalForm={activeItem.form.total} />
+                    // El `key` es imprescindible: sin el, React reusa el mismo panel al pasar
+                    // de una foto a otra y se arrastran las correcciones a medias de la anterior
+                    // (llegaba a guardar un alias con los codigos del remito anterior).
+                    <ItemsDetectados key={activeItem.id} extracted={activeItem.extracted} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} totalForm={activeItem.form.total} />
                   )}
                 </div>
               </div>
@@ -2245,13 +2306,27 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
                   onChange={e => updateForm(activeIdx, "nota", e.target.value)} placeholder="..." />
               </div>
 
+              {saveError && (
+                <p style={{ fontSize: 12, color: saveError.startsWith("⚠") ? "#8A5A2B" : "#B3261E",
+                            fontWeight: 600, margin: 0, background: "#FFE8E4", borderRadius: 8, padding: "8px 10px" }}>
+                  {saveError}
+                </p>
+              )}
+
               <div style={{ display: "flex", gap: 10 }}>
-                <button className="btn btn-primary" onClick={() => saveItem(activeIdx)}
-                  disabled={!activeItem.form.vendedoraId || !activeItem.form.total || activeItem.status === "processing"}
-                  style={{ flex: 1, padding: 14, fontSize: 15, opacity: (!activeItem.form.vendedoraId || !activeItem.form.total || activeItem.status === "processing") ? 0.5 : 1 }}>
-                  Guardar venta {doneCount > 1 ? `(quedan ${doneCount})` : ""}
-                </button>
-                <button onClick={() => removeItem(activeIdx)}
+                {(() => {
+                  const guardando = guardandoIdx !== null;
+                  const bloqueado = !activeItem.form.vendedoraId || !activeItem.form.total
+                                    || activeItem.status === "processing" || guardando;
+                  return (
+                    <button className="btn btn-primary" onClick={() => saveItem(activeIdx)}
+                      disabled={bloqueado}
+                      style={{ flex: 1, padding: 14, fontSize: 15, opacity: bloqueado ? 0.5 : 1 }}>
+                      {guardando ? "Guardando..." : `Guardar venta ${doneCount > 1 ? `(quedan ${doneCount})` : ""}`}
+                    </button>
+                  );
+                })()}
+                <button onClick={() => removeItem(activeIdx)} disabled={guardandoIdx !== null}
                   style={{ background: "#FFF8F5", border: "1px solid #2A2A3E", borderRadius: 8, color: "#F87171", padding: "14px 16px", cursor: "pointer", fontSize: 20 }}>🗑</button>
               </div>
             </div>
@@ -2300,13 +2375,20 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
           </div>
           <button className="btn btn-primary" onClick={async () => {
             if (!manualForm.vendedoraId || !manualForm.total) return;
-            await addVenta({ ...manualForm, vendedoraId: Number(manualForm.vendedoraId), total: Number(manualForm.total) });
+            setManualError(null);
+            const r = await addVenta({ ...manualForm, vendedoraId: Number(manualForm.vendedoraId), total: Number(manualForm.total) });
+            if (!r.ok) { setManualError("NO se guardó: " + r.error + " — los datos siguen acá, probá de nuevo."); return; }
+            if (r.avisos.length) setManualError("⚠ " + r.avisos.join(" · "));
             setManualSaved(true);
             setManualForm({ cliente: "", vendedoraId: "", total: "", fecha: fechaLote(), nota: "" });
             setTimeout(() => { setManualSaved(false); setManualOpen(false); }, 2000);
           }} disabled={!manualForm.vendedoraId || !manualForm.total} style={{ padding: 14, fontSize: 15, opacity: (!manualForm.vendedoraId || !manualForm.total) ? 0.5 : 1 }}>
             Guardar venta
           </button>
+          {manualError && (
+            <p style={{ fontSize: 12, color: manualError.startsWith("⚠") ? "#8A5A2B" : "#B3261E", fontWeight: 600,
+                        margin: 0, background: "#FFE8E4", borderRadius: 8, padding: "8px 10px" }}>{manualError}</p>
+          )}
           {manualSaved && <p style={{ textAlign: "center", color: "#10B981", fontWeight: 600 }}>✓ Guardada</p>}
         </div>
       )}
@@ -2895,8 +2977,9 @@ function Config({ vendedoras, setVendedoras, clientes, setClientes, ventas, setV
   const addVendedora = async () => {
     if (!nueva.nombre || !nueva.comision) return;
     const row = { nombre: nueva.nombre, comision: Number(nueva.comision), color: nueva.color };
-    const saved = await dbInsert("vendedoras", row);
-    if (saved) setVendedoras(v => [...v, saved]);
+    const { row: saved, error } = await dbInsert("vendedoras", row);
+    if (error || !saved) { window.alert("No se pudo agregar la vendedora: " + (error || "")); return; }
+    setVendedoras(v => [...v, saved]);
     setNueva({ nombre: "", comision: "", color: "#8B5CF6" });
   };
 
