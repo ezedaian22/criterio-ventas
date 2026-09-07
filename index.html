@@ -501,6 +501,49 @@ function hoyLocal(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// Leyenda fija arriba de todo con la fecha del último backup local (ver
+// Documents/criterio-ventas-backups). El script de backup inserta una fila en
+// backups_log cada vez que corre; acá solo se lee la última.
+// Si la tabla todavía no existe, no se muestra nada: no es un error del usuario,
+// es que falta correr el SQL que la crea.
+function UltimoBackup() {
+  const [ultimo, setUltimo] = useState(null); // null = todavía no se sabe / no hay tabla
+
+  useEffect(() => {
+    sb.from("backups_log")
+      .select("created_at, ok")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .then(({ data, error }) => {
+        if (!error && data && data[0]) setUltimo(data[0]);
+      });
+  }, []);
+
+  if (!ultimo) return null;
+
+  const fecha = new Date(ultimo.created_at);
+  const fechaTexto = fecha.toLocaleDateString("es-AR") + " " +
+    fecha.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" });
+  // Lunes a viernes corre a las 13:55: un salto de más de 4 días (cubre un fin de
+  // semana largo) sin ningún backup nuevo es la señal de que algo dejó de correr,
+  // no solo que hoy es sábado.
+  const diasSinCorrer = (Date.now() - fecha.getTime()) / 86400000;
+  const estado = !ultimo.ok ? "error" : diasSinCorrer > 4 ? "atrasado" : "ok";
+
+  const estilos = {
+    ok:        { bg: "#E6F7EF", color: "#0B7A55", texto: `🗄️ Último backup: ${fechaTexto}` },
+    atrasado:  { bg: "#FFF4E6", color: "#8A5A2B", texto: `⚠️ Último backup: ${fechaTexto} (hace más de 4 días)` },
+    error:     { bg: "#FFE8E4", color: "#B3261E", texto: `❌ El último backup (${fechaTexto}) falló — revisar backup.log` },
+  }[estado];
+
+  return (
+    <div style={{ background: estilos.bg, color: estilos.color, fontSize: 12, fontWeight: 600,
+                  textAlign: "center", padding: "4px 8px" }}>
+      {estilos.texto}
+    </div>
+  );
+}
+
 function App({ onLogout, rol }) {
   const esDeposito = rol === "deposito";
   const [tab, setTab] = useState(esDeposito ? "clientes" : "dashboard");
@@ -710,6 +753,8 @@ function App({ onLogout, rol }) {
         .fade-in { animation: fadeIn 0.4s ease; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
       `}</style>
+
+      <UltimoBackup />
 
       {/* Header */}
       <div style={{ borderBottom: "1px solid #1E1E2E", padding: "0 24px" }}>
