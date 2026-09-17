@@ -702,6 +702,39 @@ function App({ onLogout, rol }) {
     return { ok: true, error: null };
   };
 
+  // ── Corregir la vendedora de una venta mal cargada ──
+  // Si la comision de esa venta YA se pago, el pago NO se toca: es plata que salio
+  // de verdad y borrarla seria falsear el registro. Lo que se hace es destildar la
+  // venta, para que vuelva a figurar pendiente para la vendedora correcta. El
+  // resultado es el correcto: a la que cobro de mas le queda saldo negativo ese mes
+  // y a la que corresponde le queda a pagar, y los dos saldos se compensan.
+  // La correccion queda escrita en la nota de la venta, que es lo unico que despues
+  // permite explicar de donde salio el descuadre.
+  const cambiarVendedoraVenta = async (venta, nuevaId) => {
+    const idViejo = venta.vendedora_id || venta.vendedoraId;
+    const vieja = vendedoras.find(x => x.id === idViejo);
+    const nueva = vendedoras.find(x => x.id === Number(nuevaId));
+    if (!nueva) return { ok: false, error: "No encontré esa vendedora" };
+    if (vieja && vieja.id === nueva.id) return { ok: false, error: "Ya es esa vendedora" };
+
+    const d = new Date();
+    const cuando = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+    // .trim(): algunos nombres estan guardados con un espacio al final y la marca
+    // salia con doble espacio, que despues rompe la busqueda del Dashboard.
+    const marca = `[corregida ${cuando}: de ${vieja ? String(vieja.nombre).trim() : "?"} a ${String(nueva.nombre).trim()}]`;
+    const updates = {
+      vendedora_id: nueva.id,
+      nota: venta.nota ? `${venta.nota} ${marca}` : marca,
+    };
+    // Estaba paga: vuelve a pendiente para que se le pueda pagar a la correcta.
+    if (venta.pagado) updates.pagado = false;
+
+    const r = await dbUpdate("ventas", venta.id, updates);
+    if (!r.ok) return r;
+    setVentas(vs => vs.map(v => v.id === venta.id ? { ...v, ...updates } : v));
+    return { ok: true, error: null, eraPaga: !!venta.pagado, de: vieja ? String(vieja.nombre).trim() : "?", a: String(nueva.nombre).trim() };
+  };
+
   // Cambiar el % de comision ahora se guarda. Antes solo cambiaba en pantalla y
   // volvia al valor viejo al recargar, despues de haber recalculado todo el historial.
   const cambiarComision = async (vendedoraId, comision) => {
@@ -817,7 +850,7 @@ function App({ onLogout, rol }) {
         {!esDeposito && tab === "nueva" && <NuevaVenta vendedoras={vendedoras} clientes={clientes} addVenta={addVenta} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} aliasClientes={aliasClientes} />}
         {!esDeposito && tab === "resumen" && <Resumen ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {!esDeposito && tab === "comisiones" && <Comisiones ventas={ventas} vendedoras={vendedoras} pagos={pagos} addPago={addPago} marcarVentasPagadas={marcarVentasPagadas} currentMes={currentMes} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
-        {!esDeposito && tab === "historial" && <Historial ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
+        {!esDeposito && tab === "historial" && <Historial ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} cambiarVendedoraVenta={cambiarVendedoraVenta} />}
         {!esDeposito && tab === "comparar" && <Comparar ventas={ventas} vendedoras={vendedoras} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {!esDeposito && tab === "articulos" && <Articulos ventaItems={ventaItems} ventas={ventas} catalogo={catalogo} fmtPeso={fmtPeso} MESES={MESES} getMonthKey={getMonthKey} />}
         {tab === "clientes" && <Clientes vendedoras={vendedoras} esDeposito={esDeposito} />}
@@ -1686,6 +1719,11 @@ function Dashboard({ ventas, vendedoras, pagos, currentMes, getComisionMes, getP
             ])].filter(mk => mk && mk < currentMes);
             const arrastre = mesesPrevios.reduce(
               (s, mk) => s + (getComisionMes(v.id, mk) - getPagadoMes(v.id, mk)), 0);
+            // Ventas que se le sacaron a esta vendedora corrigiendo una carga mal hecha.
+            // Son la explicacion de que figure "pagado de mas": la comision se le
+            // recalculo sin esa venta, pero el pago que ya se le hizo sigue estando.
+            const reasignadas = ventas.filter(vt =>
+              String(vt.nota || "").includes(`: de ${String(v.nombre).trim()} a `));
             return (
               <div key={v.id} style={{ display: "flex", alignItems: "center", gap: 16, padding: "12px 0", borderBottom: "1px solid #1E1E2E" }}>
                 <div style={{ width: 36, height: 36, borderRadius: "50%", background: v.color + "22", border: `2px solid ${v.color}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
@@ -1703,6 +1741,14 @@ function Dashboard({ ventas, vendedoras, pagos, currentMes, getComisionMes, getP
                   {Math.abs(arrastre) >= 1 && (
                     <p style={{ fontSize: 10, color: arrastre > 0 ? "#F87171" : "#8A5A2B", fontWeight: 600, marginTop: 2 }}>
                       {arrastre > 0 ? `+ ${fmtPeso(Math.round(arrastre))} de meses anteriores` : `${fmtPeso(Math.round(Math.abs(arrastre)))} de más, de antes`}
+                    </p>
+                  )}
+                  {reasignadas.length > 0 && (deuda < 0 || arrastre < 0) && (
+                    <p style={{ fontSize: 10, color: "#8A5A2B", marginTop: 3, maxWidth: 230, textAlign: "right", lineHeight: 1.35 }}>
+                      ℹ️ {reasignadas.length === 1
+                        ? "Una venta que tenía cargada se pasó a otra vendedora"
+                        : `${reasignadas.length} ventas que tenía cargadas se pasaron a otra vendedora`}
+                      . Por eso figura cobrado de más: el pago ya hecho no se tocó. Está en Historial, en la nota de la venta.
                     </p>
                   )}
                 </div>
@@ -2971,7 +3017,39 @@ function Comisiones({ ventas, vendedoras, pagos, addPago, marcarVentasPagadas, c
 }
 
 // ─── HISTORIAL ────────────────────────────────────────────────────────────────
-function Historial({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
+function Historial({ ventas, vendedoras, fmtPeso, MESES, getMonthKey, cambiarVendedoraVenta }) {
+  const [editando, setEditando] = useState(null);   // id de la venta
+  const [nuevaVend, setNuevaVend] = useState("");
+  const [guardandoVend, setGuardandoVend] = useState(false);
+  const [avisoVend, setAvisoVend] = useState(null);
+
+  const confirmarCambio = async (vt) => {
+    const nuevaRaw = vendedoras.find(x => x.id === Number(nuevaVend));
+    const viejaRaw = vendedoras.find(x => x.id === (vt.vendedora_id || vt.vendedoraId));
+    const nueva = nuevaRaw ? { ...nuevaRaw, nombre: String(nuevaRaw.nombre).trim() } : null;
+    const vieja = viejaRaw ? { ...viejaRaw, nombre: String(viejaRaw.nombre).trim() } : null;
+    if (!nueva) return;
+    if (vt.pagado && !window.confirm(
+      `Esta venta YA está paga.\n\n` +
+      `Al pasarla de ${vieja ? vieja.nombre : "?"} a ${nueva.nombre}:\n` +
+      `· El pago que se le hizo a ${vieja ? vieja.nombre : "?"} NO se toca — la plata ya salió.\n` +
+      `· Va a figurar que ${vieja ? vieja.nombre : "?"} cobró de más ese mes.\n` +
+      `· La venta vuelve a quedar pendiente para ${nueva.nombre}, para poder pagársela.\n\n` +
+      `¿Seguimos?`)) return;
+
+    setGuardandoVend(true);
+    const r = await cambiarVendedoraVenta(vt, nuevaVend);
+    setGuardandoVend(false);
+    if (!r.ok) { setAvisoVend({ tipo: "error", txt: "No se pudo cambiar: " + r.error }); return; }
+    setEditando(null);
+    setAvisoVend({
+      tipo: r.eraPaga ? "atencion" : "ok",
+      txt: r.eraPaga
+        ? `Venta pasada de ${r.de} a ${r.a}. Como ya estaba paga, ${r.de} queda con saldo a favor ese mes y la venta figura pendiente para ${r.a}.`
+        : `Venta pasada de ${r.de} a ${r.a}. La comisión se movió sola.`,
+    });
+  };
+
   const [filtroVendedora, setFiltroVendedora] = useState("all");
   const [filtroAnio, setFiltroAnio] = useState("all");
   const [filtroMes, setFiltroMes] = useState("all");
@@ -3071,6 +3149,22 @@ function Historial({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
         </div>
       </div>
 
+      {avisoVend && (
+        <div style={{ background: avisoVend.tipo === "error" ? "#FFE8E4" : avisoVend.tipo === "atencion" ? "#FFF4E6" : "#E6F7EF",
+                      border: `1px solid ${avisoVend.tipo === "error" ? "#E8A090" : avisoVend.tipo === "atencion" ? "#E8C4B0" : "#A8D8C0"}`,
+                      borderRadius: 8, padding: "10px 12px" }}>
+          <p style={{ fontSize: 12, fontWeight: 600, margin: 0,
+                      color: avisoVend.tipo === "error" ? "#B3261E" : avisoVend.tipo === "atencion" ? "#8A5A2B" : "#0B7A55" }}>
+            {avisoVend.tipo === "error" ? "✕ " : avisoVend.tipo === "atencion" ? "⚠ " : "✓ "}{avisoVend.txt}
+          </p>
+          {avisoVend.tipo === "atencion" && (
+            <p style={{ fontSize: 11, color: "#7A5848", margin: "4px 0 0 0" }}>
+              El pago que ya se hizo no se tocó: esa plata salió de verdad. Los dos saldos se compensan entre sí.
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
         <div style={{ padding: "12px 16px", borderBottom: "1px solid #1E1E2E", display: "flex", justifyContent: "space-between" }}>
           <span style={{ fontSize: 11, color: "#6B4A3E", textTransform: "uppercase", letterSpacing: "0.1em" }}>{filtradas.length} ventas</span>
@@ -3097,6 +3191,33 @@ function Historial({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
                   </p>
                 )}
                 {v.nota && <p style={{ fontSize: 11, color: "#7A5848", marginTop: 1 }}>{v.nota}</p>}
+
+                {/* Corregir la vendedora de una venta mal cargada */}
+                {editando === v.id ? (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
+                    <select className="input" value={nuevaVend} onChange={e => setNuevaVend(e.target.value)}
+                      style={{ width: "auto", minWidth: 130, fontSize: 12, padding: "4px 8px" }}>
+                      <option value="">Pasar a...</option>
+                      {vendedoras.filter(x => x.id !== (v.vendedora_id || v.vendedoraId))
+                        .map(x => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+                    </select>
+                    <button onClick={() => confirmarCambio(v)} disabled={!nuevaVend || guardandoVend}
+                      style={{ background: "#A85D43", color: "#fff", border: "none", borderRadius: 6,
+                               padding: "5px 11px", fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+                               fontWeight: 600, opacity: (!nuevaVend || guardandoVend) ? 0.5 : 1 }}>
+                      {guardandoVend ? "Guardando..." : "Confirmar"}
+                    </button>
+                    <button onClick={() => { setEditando(null); setNuevaVend(""); }}
+                      style={{ background: "none", border: "none", color: "#7A5848", cursor: "pointer",
+                               fontSize: 11, textDecoration: "underline", fontFamily: "inherit" }}>Cancelar</button>
+                  </div>
+                ) : (
+                  <button onClick={() => { setEditando(v.id); setNuevaVend(""); setAvisoVend(null); }}
+                    style={{ background: "none", border: "none", color: "#A85D43", cursor: "pointer",
+                             fontSize: 10, padding: "3px 0", textDecoration: "underline", fontFamily: "inherit" }}>
+                    cambiar vendedora
+                  </button>
+                )}
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
                 <span style={{ fontSize: 15, fontWeight: 700 }}>{fmtPeso(v.total)}</span>
