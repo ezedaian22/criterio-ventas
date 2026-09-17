@@ -2173,12 +2173,53 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
     // saldo y lo decide la persona, que tiene la foto delante.
     const totalFinal = extracted?.totalConDescuento ?? extracted?.total ?? "";
     const saldo = Number(extracted?.saldoAnterior || 0);
+
+    // ── Total del remito ──
+    // Los renglones suman el BRUTO (antes del descuento), asi que la comparacion
+    // honesta es contra extracted.total. Si solo hay total con descuento, la
+    // diferencia puede ser el descuento y no un error de lectura.
+    const renglones = extracted?.items || [];
+    const sumaItems = renglones.reduce((s, it) => s + Number(it.total || 0), 0);
+    const leidoNum = Number(totalFinal);
+    const hayLeido = totalFinal !== null && totalFinal !== undefined && totalFinal !== ""
+                     && Number.isFinite(leidoNum) && leidoNum > 0;
+    const bruto = Number(extracted?.total ?? 0);
+    const descuento = bruto > 0 && hayLeido && leidoNum < bruto ? bruto - leidoNum : 0;
+
+    let total, autoSumado = false, discrepancia = null;
+
+    if (!hayLeido && sumaItems > 0) {
+      // No se pudo leer el total: lo completamos sumando los renglones.
+      total = sumaItems;
+      autoSumado = true;
+    } else {
+      total = hayLeido ? leidoNum : (prevForm?.total || "");
+
+      // Hay total leido Y renglones: si no cierran, lo decide la persona.
+      const base = bruto > 0 ? bruto : leidoNum;
+      const dif = Math.abs(sumaItems - base);
+      // El saldo anterior explica la diferencia sin que haya nada mal leido.
+      const difEsElSaldo = saldo > 0 && Math.abs(dif - saldo) < Math.max(1, saldo * 0.02);
+      if (hayLeido && sumaItems > 0 && base > 0 && dif > Math.max(1, base * 0.02) && !difEsElSaldo) {
+        discrepancia = {
+          leido: leidoNum,
+          suma: sumaItems,
+          // Si el remito tenia descuento, se le aplica el mismo al total sumado,
+          // para que las dos opciones sean comparables.
+          sugerido: Math.round(sumaItems - descuento),
+          descuento,
+        };
+      }
+    }
+
     return {
       cliente: clienteFinal || prevForm?.cliente || "",
       _clienteLeido: real ? leido : null,
       _saldoAnterior: saldo > 0 ? saldo : null,
+      _totalAutoSumado: autoSumado ? sumaItems : null,
+      _discrepancia: discrepancia,
       vendedoraId: vendedoraIdAuto ? String(vendedoraIdAuto) : (prevForm?.vendedoraId || ""),
-      total: totalFinal !== null && totalFinal !== undefined && totalFinal !== "" ? totalFinal : (prevForm?.total || ""),
+      total,
       fecha: fechaLote(),
       nota: prevForm?.nota || "",
     };
@@ -2253,8 +2294,10 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
 
     const cost = costearVenta(item.extracted, catalogo, aliases);
     // Los campos con _ son de pantalla, no columnas de la tabla: si se mandan,
-    // Supabase rechaza el insert entero.
-    const { _clienteLeido, _saldoAnterior, ...formLimpio } = item.form;
+    // Supabase rechaza el insert entero. Se filtran por prefijo y no uno por uno,
+    // para que agregar un campo de pantalla nuevo no rompa el guardado.
+    const formLimpio = Object.fromEntries(
+      Object.entries(item.form).filter(([k]) => !k.startsWith("_")));
     const r = await addVenta({
       ...formLimpio,
       vendedoraId: Number(item.form.vendedoraId),
@@ -2493,6 +2536,58 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
                     onChange={e => updateForm(activeIdx, "fecha", e.target.value)} />
                 </div>
               </div>
+
+              {/* El remito no traía total legible: se completó sumando los renglones */}
+              {activeItem.form._totalAutoSumado > 0 && (
+                <div style={{ background: "#FFF4E6", border: "1px solid #E8C4B0", borderRadius: 8, padding: "10px 12px" }}>
+                  <p style={{ fontSize: 12, color: "#8A5A2B", fontWeight: 600, margin: 0 }}>
+                    ℹ️ El remito no traía un total legible — lo puse sumando los {(activeItem.extracted?.items || []).length} renglones
+                  </p>
+                  <p style={{ fontSize: 11, color: "#7A5848", margin: "4px 0 0 0" }}>
+                    Quedó en {fmtPeso(activeItem.form._totalAutoSumado)}. Si en la foto dice otra cosa, corregilo arriba a mano.
+                  </p>
+                </div>
+              )}
+
+              {/* El total leído y la suma de los renglones no cierran: elige la persona */}
+              {activeItem.form._discrepancia && (() => {
+                const d = activeItem.form._discrepancia;
+                const elegir = (valor) => {
+                  updateForm(activeIdx, "total", String(valor));
+                  updateForm(activeIdx, "_discrepancia", null);
+                };
+                const elegido = Number(activeItem.form.total);
+                const btn = (activo) => ({
+                  background: activo ? "#A85D43" : "#FFF8F5", color: activo ? "#fff" : "#5A3828",
+                  border: `1px solid ${activo ? "#A85D43" : "#D4A090"}`, borderRadius: 7,
+                  padding: "8px 12px", fontSize: 12, cursor: "pointer", fontFamily: "inherit",
+                  textAlign: "left", flex: 1, minWidth: 150,
+                });
+                return (
+                  <div style={{ background: "#FFE8E4", border: "1px solid #E8A090", borderRadius: 8, padding: "10px 12px" }}>
+                    <p style={{ fontSize: 12, color: "#B3261E", fontWeight: 700, margin: 0 }}>
+                      ⚠ El total del remito y la suma de los renglones no coinciden
+                    </p>
+                    <p style={{ fontSize: 11, color: "#7A2E28", margin: "4px 0 8px 0" }}>
+                      Se llevan {fmtPeso(Math.abs(d.leido - d.sugerido))} de diferencia. Mirá la foto y decime cuál es el bueno
+                      {d.descuento > 0 ? ` (el remito tiene un descuento de ${fmtPeso(d.descuento)}, ya aplicado a las dos opciones)` : ""}.
+                    </p>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <button onClick={() => elegir(d.leido)} style={btn(elegido === d.leido)}>
+                        <b>{fmtPeso(d.leido)}</b><br />
+                        <span style={{ fontSize: 10 }}>el total escrito en el remito</span>
+                      </button>
+                      <button onClick={() => elegir(d.sugerido)} style={btn(elegido === d.sugerido)}>
+                        <b>{fmtPeso(d.sugerido)}</b><br />
+                        <span style={{ fontSize: 10 }}>la suma de los {(activeItem.extracted?.items || []).length} renglones</span>
+                      </button>
+                    </div>
+                    <p style={{ fontSize: 10, color: "#7A2E28", margin: "6px 0 0 0" }}>
+                      Si ninguno es correcto, escribilo a mano en Total venta. Por ahora se va a guardar {fmtPeso(elegido)}.
+                    </p>
+                  </div>
+                );
+              })()}
 
               {/* El saldo anterior no se resta solo: se muestra y lo decide la persona */}
               {activeItem.form._saldoAnterior > 0 && (
