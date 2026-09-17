@@ -2856,6 +2856,39 @@ function Comisiones({ ventas, vendedoras, pagos, addPago, marcarVentasPagadas, c
               <div style={{ marginBottom: 14 }}>
                 <p style={{ fontSize: 11, color: "#7A5848", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em" }}>Seleccioná las ventas a pagar</p>
                 {ventasPendientes.length === 0 && <p style={{ fontSize: 12, color: "#10B981" }}>No hay ventas pendientes</p>}
+
+                {/* Seleccionar todas de una: con 15 pendientes eran 15 clicks */}
+                {ventasPendientes.length > 1 && (() => {
+                  const idsPend = ventasPendientes.map(vt => vt.id);
+                  const todas = idsPend.every(id => seleccionadas.includes(id));
+                  const algunas = !todas && idsPend.some(id => seleccionadas.includes(id));
+                  const totalPend = ventasPendientes.reduce((s, vt) => s + Number(vt.total || 0), 0);
+                  return (
+                    <div onClick={() => setSeleccionadas(todas ? [] : idsPend)}
+                      style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", marginBottom: 6,
+                               borderRadius: 8, background: todas ? v.color + "18" : "#FFF8F5",
+                               border: `1px solid ${todas || algunas ? v.color : "#E8C4B0"}`,
+                               cursor: "pointer", fontWeight: 700 }}>
+                      <div style={{ width: 18, height: 18, borderRadius: 4,
+                                    border: `2px solid ${todas || algunas ? v.color : "#C4A090"}`,
+                                    background: todas || algunas ? v.color : "transparent",
+                                    display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                        {todas && <span style={{ color: "#fff", fontSize: 11, fontWeight: 700 }}>✓</span>}
+                        {algunas && <span style={{ color: "#fff", fontSize: 12, fontWeight: 700, lineHeight: 1 }}>–</span>}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <p style={{ fontSize: 13, fontWeight: 700 }}>
+                          {todas ? "Deseleccionar todas" : `Seleccionar todas (${ventasPendientes.length})`}
+                        </p>
+                      </div>
+                      <div style={{ textAlign: "right", flexShrink: 0 }}>
+                        <p style={{ fontSize: 13, fontWeight: 600 }}>{fmtPeso(totalPend)}</p>
+                        <p style={{ fontSize: 11, color: v.color }}>com: {fmtPeso(totalPend * v.comision / 100)}</p>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {ventasPendientes.map(vt => {
                   const sel = seleccionadas.includes(vt.id);
                   return (
