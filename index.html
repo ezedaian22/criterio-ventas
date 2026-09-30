@@ -1787,8 +1787,14 @@ El codigo de articulo suele ser un numero corto (1 a 4 digitos) al lado de la de
 IMPORTANTE con los totales: a veces el remito suma un saldo o deuda anterior al final (puede decir "saldo", "deuda", "cta anterior", "resto"). Ese monto NO es parte de la venta: va en saldoAnterior y NO se incluye en total ni en totalConDescuento. Los campos total y totalConDescuento son solo por la mercaderia de este remito.
 Si no podés leer algún campo, poné null.`;
 
-const BACKUP_API_KEY = "AIzaSyDaAuhseWd2ktPgwi0w1AzKjHRoQyIIHg8";
+// Esta key quedo deshabilitada por Google ("reported as leaked") justamente por
+// estar escrita aca, en un repo publico. Se deja vacia: ya no sirve para nada y
+// mantenerla solo lograba que el error dijera "key filtrada" en vez de la verdad,
+// que es que falta cargar una key en Config.
+const BACKUP_API_KEY = "";
 let lastKeyUsed = 0; // 0 = primary, 1 = backup
+
+const TIMEOUT_LECTURA_MS = 90000;
 
 async function extraerDatosFotoBase64(base64, mediaType) {
   const primaryKey = localStorage.getItem("cv_apikey") || window.__geminiPrimaryKey || "";
@@ -1810,17 +1816,35 @@ async function extraerDatosFotoBase64(base64, mediaType) {
       : `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
     const headers = { "Content-Type": "application/json" };
     if (isNewFormat) headers["x-goog-api-key"] = apiKey;
-    const resp = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        contents: [{ parts: [
-          { inline_data: { mime_type: mediaType, data: base64 } },
-          { text: PROMPT_EXTRACCION }
-        ]}],
-        generationConfig: { temperature: 0.1 }
-      })
-    });
+
+    // Timeout. Sin esto, si la peticion se traba la foto queda en "Leyendo
+    // comprobante..." para siempre y no hay forma de que salga sola: hay que
+    // recargar la pagina y volver a subir todo.
+    const control = new AbortController();
+    const reloj = setTimeout(() => control.abort(), TIMEOUT_LECTURA_MS);
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: "POST",
+        headers,
+        signal: control.signal,
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { inline_data: { mime_type: mediaType, data: base64 } },
+            { text: PROMPT_EXTRACCION }
+          ]}],
+          generationConfig: { temperature: 0.1 }
+        })
+      });
+    } catch (e) {
+      clearTimeout(reloj);
+      lastError = e.name === "AbortError"
+        ? new Error(`La lectura tardó más de ${Math.round(TIMEOUT_LECTURA_MS / 1000)} segundos y se cortó. Puede ser la conexión. Probá de nuevo con "Reintentar".`)
+        : new Error("No se pudo conectar con Gemini: " + (e.message || String(e)));
+      continue;
+    }
+    clearTimeout(reloj);
+
     let data;
     try { data = await resp.json(); } catch(e) { lastError = new Error("HTTP " + resp.status); continue; }
     if (resp.status === 429 || (data.error && data.error.code === 429)) {
@@ -1843,6 +1867,35 @@ async function extraerDatosFotoBase64(base64, mediaType) {
     catch(e) { lastError = new Error("JSON inválido"); continue; }
   }
   throw lastError || new Error("No se pudo procesar la imagen");
+}
+
+// Las fotos del celular vienen en 4000px y se mandaban ENTERAS a Gemini, ademas
+// en base64, que pesa un 33% mas, y de a 3 en paralelo. Varios MB por foto: eso
+// es lo que hacia que la lectura tardara una eternidad o se trabara.
+// A 2000px la letra manuscrita se lee igual de bien y el archivo pesa una fraccion.
+const MAX_LADO = 2000;
+function achicarImagen(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const lado = Math.max(img.width, img.height);
+      if (!lado || lado <= MAX_LADO) return resolve({ dataUrl, mediaType: null });
+      try {
+        const escala = MAX_LADO / lado;
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.width * escala);
+        c.height = Math.round(img.height * escala);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        resolve({ dataUrl: c.toDataURL("image/jpeg", 0.85), mediaType: "image/jpeg" });
+      } catch (e) {
+        resolve({ dataUrl, mediaType: null }); // si algo falla, se manda la original
+      }
+    };
+    // Si la imagen no se puede leer, que siga el camino de siempre y falle mas
+    // adelante con un mensaje, en vez de romper la carga entera.
+    img.onerror = () => resolve({ dataUrl, mediaType: null });
+    img.src = dataUrl;
+  });
 }
 
 function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias, totalForm }) {
@@ -2291,15 +2344,16 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
   const addFiles = async (files) => {
     const arr = Array.from(files);
     const newItems = await Promise.all(arr.map(async (file) => {
-      const dataUrl = await new Promise((res) => {
+      const original = await new Promise((res) => {
         const r = new FileReader();
         r.onload = () => res(r.result);
         r.readAsDataURL(file);
       });
+      const chica = await achicarImagen(original);
       return {
         id: Date.now() + Math.random(),
-        dataUrl,
-        mediaType: file.type || "image/jpeg",
+        dataUrl: chica.dataUrl,
+        mediaType: chica.mediaType || file.type || "image/jpeg",
         status: "pending",
         extracted: null,
         form: defaultForm(),
