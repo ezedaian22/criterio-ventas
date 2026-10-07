@@ -84,7 +84,7 @@ async function espiarTablaCostos(nombre, schema = "costos") {
 const STOP_DESC = new Set(["de","con","sin","y","o","el","la","los","las","un","una","para","en","a","del","al","por"]);
 
 // Solo notacion con barra, que es estandar. NO se expanden abreviaturas de palabras:
-// truncar palabras lo resuelve el match por prefijo en similitudDesc, sin tener que
+// truncar palabras lo resuelve el match por prefijo del motor de candidatos, sin tener que
 // adivinar que significa cada abreviatura del rubro (ej: "cord" = corderito, no cordon).
 const ABREVS = [
   [/\bc\s*\/\s*/g, "con "],
@@ -110,24 +110,6 @@ function tokensDesc(s) {
 }
 
 // Coeficiente de Dice sobre palabras, con tolerancia a plurales/typos por prefijo
-function similitudDesc(a, b) {
-  const ta = tokensDesc(a), tb = tokensDesc(b);
-  if (!ta.length || !tb.length) return 0;
-  const usados = new Array(tb.length).fill(false);
-  let comunes = 0;
-  ta.forEach(t => {
-    let idx = tb.findIndex((u, i) => !usados[i] && u === t);
-    if (idx === -1) {
-      idx = tb.findIndex((u, i) => {
-        if (usados[i]) return false;
-        const n = Math.min(4, Math.min(t.length, u.length));
-        return n >= 3 && t.slice(0, n) === u.slice(0, n);
-      });
-      if (idx !== -1) { usados[idx] = true; comunes += 0.75; return; }
-    } else { usados[idx] = true; comunes += 1; }
-  });
-  return (2 * comunes) / (ta.length + tb.length);
-}
 
 const normCodigo = c => String(c || "").trim().toUpperCase().replace(/\s+/g, "");
 
@@ -146,10 +128,6 @@ const canonCodigo = c => {
 
 // Palabras que indican que un renglon del remito son VARIOS articulos del catalogo
 const PALABRAS_CONJUNTO = ["conjunto", "juego", "set", "combo"];
-const esConjunto = desc => {
-  const t = tokensDesc(desc);
-  return t.some(w => PALABRAS_CONJUNTO.includes(w));
-};
 
 // Para un conjunto, los candidatos salen de las palabras distintivas
 // (sacando la que indica conjunto): "conjunto darlon" -> todos los darlon
@@ -173,71 +151,92 @@ function candidatosConjunto(desc, catalogo, limite = 12) {
 }
 
 // Devuelve el mejor match + estado + candidatos alternativos
-function matchearArticulo(codigoLeido, descLeida, catalogo, aliases = {}) {
-  const base = { codigo: null, descripcion: null, costo_total: null, estado: "sin_match", score: 0, candidatos: [] };
-  if (!catalogo || !catalogo.length) return base;
+// ── Motor de candidatos ──
+// Devuelve { candidatos: [{art, prob}], via: 'codigo'|'alias'|'descripcion'|null }
+// Es el mismo criterio que usa Criterio Local, que resuelve bastante mejor:
+//   · el CODIGO va primero (si esta escrito, es el dato mas confiable del remito),
+//   · puede devolver VARIOS candidatos con su probabilidad, en vez de elegir uno,
+//   · y dice por que matcheo, para que la persona sepa de donde salio.
+function buscarCandidatos(codigoLeido, descLeida, catalogo, aliases = {}) {
+  if (!catalogo || !catalogo.length) return { candidatos: [], via: null };
 
-  const ranking = catalogo
-    .map(a => ({ a, s: similitudDesc(descLeida, a.descripcion) }))
-    .sort((x, y) => y.s - x.s);
-  const top3 = ranking.slice(0, 3).map(r => ({ ...r.a, score: Math.round(r.s * 100) / 100 }));
-  const mejor = ranking[0] ? ranking[0].a : null;
-  const mejorScore = ranking[0] ? ranking[0].s : 0;
+  // 1) Codigo exacto. Puede haber mas de uno si el codigo se repite entre temporadas.
+  const cod = String(codigoLeido || "").trim();
+  if (cod) {
+    const canon = canonCodigo(cod);
+    const porCodigo = catalogo.filter(a => canonCodigo(a.codigo) === canon);
+    if (porCodigo.length > 0) {
+      return { candidatos: porCodigo.map(a => ({ art: a, prob: 100 })), via: "codigo" };
+    }
+  }
 
-  // 1. Alias aprendido de una correccion previa (puede tener varios codigos separados por coma)
+  // 2) Alias aprendido de una correccion previa (puede tener varios codigos: conjunto)
   const clave = normTexto(descLeida);
   if (clave && aliases[clave]) {
     const codigos = String(aliases[clave]).split(",").map(s => s.trim()).filter(Boolean);
     const arts = codigos
-      .map(cod => catalogo.find(a => canonCodigo(a.codigo) === canonCodigo(cod)))
+      .map(c => catalogo.find(a => canonCodigo(a.codigo) === canonCodigo(c)))
       .filter(Boolean);
-    if (arts.length === 1) {
-      return { ...base, ...arts[0], estado: "alias", score: 1, candidatos: top3 };
-    }
+    if (arts.length === 1) return { candidatos: [{ art: arts[0], prob: 100 }], via: "alias" };
     if (arts.length > 1) {
-      const costoSuma = arts.every(a => a.costo_total !== null)
-        ? arts.reduce((s, a) => s + Number(a.costo_total), 0)
-        : null;
-      return {
-        ...base,
+      // Conjunto: un articulo virtual con la suma de los costos
+      const costoSuma = arts.every(a => a.costo_total !== null && a.costo_total !== undefined)
+        ? arts.reduce((s, a) => s + Number(a.costo_total), 0) : null;
+      const virtual = {
         codigo: arts.map(a => a.codigo).join(" + "),
         descripcion: arts.map(a => a.descripcion).join(" + "),
         costo_total: costoSuma,
-        componentes: arts,
-        estado: "alias", score: 1, candidatos: top3,
+        _componentes: arts,
       };
+      return { candidatos: [{ art: virtual, prob: 100 }], via: "alias" };
     }
   }
 
-  // Renglon que es un conjunto: no se resuelve solo, hay que elegir los componentes
-  if (esConjunto(descLeida)) {
-    return { ...base, estado: "conjunto", score: 0, candidatos: top3 };
+  // 3) Por descripcion, con puntaje por palabras. Las coincidencias parciales (mismo
+  // prefijo de 4 letras) valen la mitad, y se penaliza cuando la descripcion del
+  // catalogo tiene muchas mas palabras que la del remito: "musculosa" no deberia
+  // ganarle a "musculosa lino nacar lisa" solo por ser mas corta.
+  const textoNorm = normTexto(descLeida);
+  if (textoNorm.length > 2) {
+    const palabras = textoNorm.split(" ").filter(p => p.length > 2);
+    if (!palabras.length) return { candidatos: [], via: null };
+    const puntuados = catalogo.map(a => {
+      const dn = normTexto(a.descripcion);
+      let hits = 0, parciales = 0;
+      palabras.forEach(p => {
+        if (dn.includes(p)) hits++;
+        else if (p.length >= 4 && dn.split(" ").some(w => w.startsWith(p.slice(0, 4)))) parciales++;
+      });
+      let score = (hits + parciales * 0.5) / palabras.length;
+      const palCat = dn.split(" ").filter(w => w.length > 2).length;
+      if (palCat > palabras.length) score *= (palabras.length / palCat) * 0.4 + 0.6;
+      return { art: a, prob: Math.round(Math.min(score, 0.99) * 100) };
+    }).filter(x => x.prob >= 30).sort((a, b) => b.prob - a.prob);
+    if (puntuados.length > 0) return { candidatos: puntuados.slice(0, 8), via: "descripcion" };
   }
+  return { candidatos: [], via: null };
+}
 
-  // 2. Codigo exacto
-  const porCodigo = codigoLeido
-    ? catalogo.find(a => canonCodigo(a.codigo) === canonCodigo(codigoLeido)) || null
-    : null;
+// Resuelve solo cuando no hay ninguna duda: un unico candidato por codigo o por alias.
+// Los de descripcion NUNCA se dan por buenos solos, por mas alto que puntuen.
+function resueltoAutomatico(m) {
+  return m && m.candidatos.length === 1 && (m.via === "codigo" || m.via === "alias")
+    ? m.candidatos[0].art : null;
+}
 
-  if (porCodigo) {
-    const hayDesc = tokensDesc(descLeida).length > 0;
-    if (!hayDesc) return { ...base, ...porCodigo, estado: "solo_codigo", score: 1, candidatos: top3 };
-    const sCod = similitudDesc(descLeida, porCodigo.descripcion);
-    if (sCod >= 0.45) return { ...base, ...porCodigo, estado: "ok", score: sCod, candidatos: top3 };
-    return { ...base, ...porCodigo, estado: "revisar", score: sCod, candidatos: top3 };
+// Adaptador para el banco de pruebas de Config: usa el MISMO motor que la pantalla
+// de carga (buscarCandidatos), para que no haya dos criterios distintos conviviendo.
+function matchearArticulo(codigoLeido, descLeida, catalogo, aliases = {}) {
+  const base = { codigo: null, descripcion: null, costo_total: null, estado: "sin_match", score: 0, candidatos: [] };
+  const m = buscarCandidatos(codigoLeido, descLeida, catalogo, aliases);
+  const top = m.candidatos.map(c => ({ ...c.art, score: c.prob / 100 }));
+  if (!m.candidatos.length) return base;
+  const auto = resueltoAutomatico(m);
+  if (auto) {
+    return { ...base, ...auto, estado: m.via === "alias" ? "alias" : "solo_codigo", score: 1, candidatos: top };
   }
-
-  // 3. Solo descripcion
-  // Empate tecnico: si el 2do candidato esta a menos de 0.08 del 1ro, la descripcion
-  // NO alcanza para decidir. No se elige ninguno: hay que mirarlo si o si.
-  const segundo = ranking[1] ? ranking[1].s : 0;
-  const empatados = mejorScore > 0 && (mejorScore - segundo) < 0.08;
-
-  if (mejorScore >= 0.45 && empatados) {
-    return { ...base, estado: "ambiguo", score: mejorScore, candidatos: top3 };
-  }
-  if (mejorScore >= 0.45) return { ...base, ...mejor, estado: "similar", score: mejorScore, candidatos: top3 };
-  return { ...base, estado: "sin_match", score: mejorScore, candidatos: top3 };
+  return { ...base, estado: m.via === "codigo" ? "ambiguo" : "similar",
+           score: m.candidatos[0].prob / 100, candidatos: top };
 }
 
 // Numero o null, conservando el 0. Number(x) || null pisa el 0 con null.
@@ -249,32 +248,54 @@ const numONull = (x) => {
 
 // Arma el costo de una venta y las filas a guardar en venta_items.
 // costoTotal queda en null si algun renglon no se pudo costear, para no inflar la ganancia.
-function costearVenta(extracted, catalogo, aliases) {
-  const items = (extracted && extracted.items) || [];
-  if (!items.length || !catalogo || !catalogo.length) {
-    return { costoTotal: null, completo: false, filas: [], sinCostear: items.length };
-  }
+// Ahora recibe los renglones YA RESUELTOS de la pantalla, en vez de volver a
+// matchear por su cuenta. Lo que se ve es exactamente lo que se guarda: antes la
+// pantalla mostraba un match y el guardado lo recalculaba, y podian no coincidir.
+function costearVenta(renglones) {
+  const lista = renglones || [];
+  if (!lista.length) return { costoTotal: null, completo: false, filas: [], sinCostear: 0 };
   let acum = 0, sinCostear = 0;
-  const filas = items.map(it => {
-    const m = matchearArticulo(it.codigo, it.descripcion, catalogo, aliases || {});
-    const cant = Number(it.cantidad || 1);
-    const costoUnit = m.costo_total !== null && m.costo_total !== undefined ? Number(m.costo_total) : null;
+  const filas = lista.map(it => {
+    const cant = Number(it.cantidad) || 1;
+    // `Number(x) || null` convertia un 0 legitimo en null (una bonificacion, por
+    // ejemplo). Solo tiene que ser null lo que realmente no vino o no es numero.
+    const costoUnit = numONull(it.costo_unitario);
     if (costoUnit === null) sinCostear++;
     else acum += costoUnit * cant;
     return {
-      articulo_codigo: m.codigo || null,
+      articulo_codigo: it.articulo_codigo || null,
       descripcion_leida: it.descripcion || null,
       cantidad: cant,
-      // `Number(x) || null` convertia un 0 legitimo en null (una bonificacion, por
-      // ejemplo). Solo tiene que ser null lo que realmente no vino o no es numero.
       precio_unitario: numONull(it.precio),
       total_item: numONull(it.total),
       costo_unitario: costoUnit,
-      estado_match: m.estado,
+      estado_match: it.articulo_codigo ? (it.via_match || "resuelto") : "sin_match",
     };
   });
   const completo = sinCostear === 0;
   return { costoTotal: completo ? acum : null, completo, filas, sinCostear };
+}
+
+// Arranca los renglones editables a partir de lo que leyo la IA, resolviendo de
+// entrada los que no tienen ninguna duda (codigo o alias).
+function armarRenglones(extracted, catalogo, aliases) {
+  const items = (extracted && extracted.items) || [];
+  return items.map(it => {
+    const m = buscarCandidatos(it.codigo, it.descripcion, catalogo || [], aliases || {});
+    const auto = resueltoAutomatico(m);
+    return {
+      cantidad: Number(it.cantidad) || 1,
+      descripcion: it.descripcion || "",
+      codigo: it.codigo || "",
+      precio: numONull(it.precio),
+      total: numONull(it.total),
+      articulo_codigo: auto ? auto.codigo : null,
+      articulo_desc: auto ? auto.descripcion : null,
+      costo_unitario: auto ? numONull(auto.costo_total) : null,
+      via_match: auto ? m.via : null,
+      confirmado: false,
+    };
+  });
 }
 
 // Catalogo completo: articulos (codigo + descripcion) cruzado con costo_articulo (costo_total)
@@ -1932,322 +1953,343 @@ function achicarImagen(dataUrl) {
   });
 }
 
-function ItemsDetectados({ extracted, fmtPeso, catalogo, aliases, guardarAlias, totalForm }) {
-  const [expanded, setExpanded] = React.useState(false);
-  const [guardado, setGuardado] = React.useState({});
-  const [errorAlias, setErrorAlias] = React.useState(null);
-  const [selConjunto, setSelConjunto] = React.useState({});
-  const [modoConjunto, setModoConjunto] = React.useState({});
-  const [corrigiendo, setCorrigiendo] = React.useState(null);
+function ItemsDetectados({ extracted, renglones, setRenglones, fmtPeso, catalogo, aliases, guardarAlias, totalForm }) {
+  const [buscadorAbierto, setBuscadorAbierto] = React.useState(null);
   const [busquedaArt, setBusquedaArt] = React.useState("");
-  const [busqConj, setBusqConj] = React.useState({});
+  const [conjuntoAbierto, setConjuntoAbierto] = React.useState(null);
+  const [conjuntoSel, setConjuntoSel] = React.useState([]);
+  const [busqConj, setBusqConj] = React.useState("");
+  const [errorAlias, setErrorAlias] = React.useState(null);
 
-  // Busca en TODO el catalogo, por codigo o por descripcion
+  const hayCat = catalogo && catalogo.length > 0;
+  const items = renglones || [];
+
+  // El matcheo solo se recalcula si cambian los renglones, el catalogo o los alias.
+  // Sin esto se rehacia con cada tecla del buscador: 500 articulos por renglon.
+  const matches = React.useMemo(
+    () => items.map(it => it.articulo_codigo ? null : buscarCandidatos(it.codigo, it.descripcion, catalogo || [], aliases || {})),
+    [items, catalogo, aliases]
+  );
+
+  const editar = (i, cambios) => setRenglones(items.map((it, j) => j === i ? { ...it, ...cambios } : it));
+  const borrarRenglon = (i) => setRenglones(items.filter((_, j) => j !== i));
+  const agregarRenglon = () => setRenglones([...items, {
+    cantidad: 1, descripcion: "", codigo: "", precio: null, total: null,
+    articulo_codigo: null, articulo_desc: null, costo_unitario: null, via_match: null, confirmado: false,
+  }]);
+
+  // Asignar un articulo a un renglon, y aprender el alias para la proxima vez
+  const asignar = async (i, art, aprender = true) => {
+    editar(i, {
+      articulo_codigo: art.codigo, articulo_desc: art.descripcion,
+      costo_unitario: numONull(art.costo_total), via_match: "manual", confirmado: true,
+    });
+    setBuscadorAbierto(null); setBusquedaArt(""); setErrorAlias(null);
+    const texto = items[i] && items[i].descripcion;
+    if (aprender && texto && guardarAlias) {
+      const r = await guardarAlias(texto, art.codigo);
+      if (!r.ok) setErrorAlias(r.error);
+    }
+  };
+
+  // Confirmar lo que la app resolvio sola: no cambia el costo (ya estaba contado),
+  // solo deja el alias aprendido para los proximos remitos.
+  const confirmar = async (i) => {
+    const it = items[i];
+    editar(i, { confirmado: true });
+    if (it.descripcion && it.articulo_codigo && guardarAlias) {
+      const r = await guardarAlias(it.descripcion, it.articulo_codigo);
+      if (!r.ok) setErrorAlias(r.error);
+    }
+  };
+
+  const soltar = (i) => editar(i, {
+    articulo_codigo: null, articulo_desc: null, costo_unitario: null, via_match: null, confirmado: false,
+  });
+
+  // Busca en TODO el catalogo, por codigo o por descripcion. "728l" encuentra al L728.
   const buscarEnCatalogo = (txt) => {
     const q = normTexto(txt);
     if (!q) return [];
-    const qTokens = tokensDesc(txt);
-    return (catalogo || [])
-      .map(a => {
-        const codMatch = normCodigo(a.codigo).includes(normCodigo(txt)) ? 2 : 0;
-        const descMatch = similitudDesc(txt, a.descripcion);
-        const contiene = qTokens.length && qTokens.every(t => normTexto(a.descripcion).includes(t)) ? 1 : 0;
-        return { a, s: codMatch + contiene + descMatch };
-      })
-      .filter(x => x.s > 0.2)
-      .sort((x, y) => y.s - x.s)
-      .slice(0, 15)
-      .map(x => x.a);
+    const qc = canonCodigo(txt);
+    return (catalogo || []).filter(a =>
+      canonCodigo(a.codigo).includes(qc) || normTexto(a.descripcion).includes(q)
+    ).slice(0, 40);
   };
 
-  const toggleComponente = (idx, codigo) => {
-    setSelConjunto(s => {
-      const actual = s[idx] || [];
-      return { ...s, [idx]: actual.includes(codigo) ? actual.filter(x => x !== codigo) : [...actual, codigo] };
+  const guardarConjunto = async (i) => {
+    if (conjuntoSel.length < 2) return;
+    const arts = conjuntoSel.map(c => (catalogo || []).find(a => canonCodigo(a.codigo) === canonCodigo(c))).filter(Boolean);
+    const costo = arts.every(a => a.costo_total !== null && a.costo_total !== undefined)
+      ? arts.reduce((s, a) => s + Number(a.costo_total), 0) : null;
+    editar(i, {
+      articulo_codigo: arts.map(a => a.codigo).join(" + "),
+      articulo_desc: arts.map(a => a.descripcion).join(" + "),
+      costo_unitario: costo, via_match: "conjunto", confirmado: true,
     });
-  };
-
-  const guardarConjunto = async (textoLeido, idx) => {
-    const codigos = selConjunto[idx] || [];
-    if (codigos.length < 2 || !guardarAlias) return;
-    const r = await guardarAlias(textoLeido, codigos.join(","));
-    if (r.ok) { setGuardado(g => ({ ...g, [idx]: codigos.join(" + ") })); setErrorAlias(null); }
-    else setErrorAlias(r.error);
-  };
-
-  const elegir = async (textoLeido, codigo, idx) => {
-    if (!guardarAlias) return;
-    const r = await guardarAlias(textoLeido, codigo);
-    if (r.ok) {
-      setGuardado(g => ({ ...g, [idx]: codigo }));
-      setErrorAlias(null);
-    } else {
-      setErrorAlias(r.error);
+    setConjuntoAbierto(null); setConjuntoSel([]); setBusqConj("");
+    const texto = items[i] && items[i].descripcion;
+    if (texto && guardarAlias) {
+      const r = await guardarAlias(texto, conjuntoSel.join(","));
+      if (!r.ok) setErrorAlias(r.error);
     }
   };
-  const items = extracted.items || [];
 
-  const hayCat = catalogo && catalogo.length > 0;
-  // useMemo: cada renglon se compara contra TODO el catalogo (526 articulos), asi que
-  // un remito de 20 renglones son ~10.000 comparaciones de texto. Sin esto se rehacian
-  // en cada renderizado, o sea con cada letra que se escribe en el buscador.
-  const conMatch = React.useMemo(() => items.map(it => ({
-    it,
-    m: hayCat ? matchearArticulo(it.codigo, it.descripcion, catalogo, aliases || {}) : null
-  })), [items, catalogo, aliases, hayCat]);
-  const visible = expanded ? conMatch : conMatch.slice(0, 3);
+  // ── estilos, con la paleta de Ventas ──
+  const inp = { fontSize: 12, padding: "4px 7px", borderRadius: 6, border: "1px solid #D4A090",
+                background: "#FFF8F5", color: "#2C1A14", fontFamily: "inherit", outline: "none" };
+  const chip = (prob) => ({
+    fontSize: 10, padding: "4px 8px", borderRadius: 7, cursor: "pointer", fontFamily: "inherit",
+    textAlign: "left", background: "#FFF8F5",
+    border: `1px solid ${prob >= 80 ? "#10B981" : prob >= 55 ? "#D98B2B" : "#D4A090"}`,
+    color: prob >= 80 ? "#0B7A55" : prob >= 55 ? "#8A5A2B" : "#7A5848",
+  });
+  const linkBtn = (color) => ({ background: "none", border: "none", color, cursor: "pointer",
+                                fontSize: 10, padding: 0, textDecoration: "underline", fontFamily: "inherit" });
 
-  const ESTILO = {
-    ok:          { color: "#10B981", txt: "✓" },
-    alias:       { color: "#10B981", txt: "✓ alias" },
-    solo_codigo: { color: "#10B981", txt: "✓ por código" },
-    similar:     { color: "#A85D43", txt: "≈ similar a" },
-    revisar:     { color: "#F59E0B", txt: "⚠ chequear este art" },
-    ambiguo:     { color: "#F59E0B", txt: "⚠ dos artículos posibles — elegir" },
-    conjunto:    { color: "#7C3AED", txt: "⊞ conjunto — elegí los artículos que lo componen" },
-    sin_match:   { color: "#B3261E", txt: "✕ sin match" },
-  };
-
-  // Los items suman ANTES del descuento, asi que se comparan contra el bruto
-  const sumaItems = items.reduce((s, it) => s + Number(it.total || 0), 0);
-  const totalBruto = Number(extracted.total ?? 0);
-  // Si el usuario corrigio el total a mano, ese manda: es el que se va a guardar
-  const totalRemito = Number(totalForm) > 0
-    ? Number(totalForm)
-    : Number(extracted.totalConDescuento ?? extracted.total ?? 0);
-  const saldoAnt = Number(extracted.saldoAnterior || 0);
-  const baseCmp = totalBruto > 0 ? totalBruto : totalRemito;
-  const descuadre = items.length > 0 && baseCmp > 0 && Math.abs(sumaItems - baseCmp) > Math.max(1, baseCmp * 0.02);
-  // Si la diferencia coincide con el saldo, no es una linea faltante sino deuda vieja
-  const difEsSaldo = saldoAnt > 0 && Math.abs(Math.abs(sumaItems - baseCmp) - saldoAnt) < Math.max(1, saldoAnt * 0.02);
-  // Descuento real deducido de los numeros (mas confiable que lo que lee la IA)
-  const descReal = sumaItems > 0 && totalRemito > 0 && totalRemito < sumaItems
-    ? Math.round((1 - totalRemito / sumaItems) * 1000) / 10
-    : null;
-
-  // Costo total del remito (solo lo que matcheo y tiene costo)
-  const costoTotal = conMatch.reduce((s, x) => {
-    if (!x.m || x.m.costo_total === null) return s;
-    return s + Number(x.m.costo_total) * Number(x.it.cantidad || 1);
-  }, 0);
-  const sinCosto = conMatch.filter(x => x.m && x.m.codigo && x.m.costo_total === null).length;
-  const sinMatch = conMatch.filter(x => x.m && !x.m.codigo).length;
-  const margen = totalRemito - costoTotal;
+  // ── totales ──
+  const sumaRenglones = items.reduce((s, it) => s + (Number(it.total) || 0), 0);
+  const totalRemito = Number(totalForm) > 0 ? Number(totalForm)
+    : Number(extracted?.totalConDescuento ?? extracted?.total ?? 0);
+  const saldoAnt = Number(extracted?.saldoAnterior || 0);
+  const conCosto = items.filter(it => numONull(it.costo_unitario) !== null);
+  const costoTotal = conCosto.reduce((s, it) => s + Number(it.costo_unitario) * (Number(it.cantidad) || 1), 0);
+  const ventaDeEsos = conCosto.reduce((s, it) => s + (Number(it.total) || 0), 0);
+  const margen = ventaDeEsos - costoTotal;
+  const sinResolver = items.filter(it => !it.articulo_codigo).length;
+  const sinCostoCargado = items.filter(it => it.articulo_codigo && numONull(it.costo_unitario) === null).length;
+  const descReal = sumaRenglones > 0 && totalRemito > 0 && totalRemito < sumaRenglones
+    ? Math.round((1 - totalRemito / sumaRenglones) * 1000) / 10 : null;
 
   return (
     <div style={{ background: "#FFFFFF", borderRadius: 8, padding: 10 }}>
-      <p style={{ fontSize: 10, color: "#A85D43", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>✓ Detectado</p>
+      <p style={{ fontSize: 10, color: "#A85D43", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
+        ✓ Detectado — {items.length} {items.length === 1 ? "renglón" : "renglones"}
+      </p>
 
-      {visible.map((x, i) => {
-        const est = x.m ? ESTILO[x.m.estado] : null;
+      {items.map((it, i) => {
+        const m = matches[i];
+        const cant = Number(it.cantidad) || 0;
+        const precio = Number(it.precio) || 0;
+        const totalLinea = Number(it.total) || 0;
+        const esperado = cant * precio;
+        const noCuadra = esperado > 0 && Math.abs(esperado - totalLinea) > 1;
+        const costoU = numONull(it.costo_unitario);
+        const margenU = costoU !== null ? precio - costoU : null;
+
         return (
-          <div key={i} style={{ marginBottom: 6, paddingBottom: 6, borderBottom: "1px solid #F4E6DE" }}>
-            <p style={{ fontSize: 11, color: "#5A3828", margin: 0 }}>
-              {x.it.cantidad}x {x.it.codigo ? <b>[{x.it.codigo}] </b> : ""}{x.it.descripcion} — {fmtPeso(x.it.total)}
-            </p>
-            {x.m && (
-              <p style={{ fontSize: 10, color: est.color, margin: "2px 0 0 0", fontWeight: 600 }}>
-                {est.txt}
-                {x.m.codigo ? ` ${x.m.codigo} — ${x.m.descripcion}` : ""}
-                {x.m.codigo && x.m.costo_total !== null ? ` · costo ${fmtPeso(x.m.costo_total)}` : ""}
-                {x.m.codigo && x.m.costo_total === null ? " · ⚠ sin costo cargado" : ""}
-              </p>
+          <div key={i} style={{ paddingBottom: 7, marginBottom: 7, borderBottom: "1px solid #F4E6DE" }}>
+
+            {/* Renglon editable */}
+            <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap" }}>
+              <input type="number" value={it.cantidad ?? ""} placeholder="cant"
+                onChange={e => { const c = Number(e.target.value) || 0; editar(i, { cantidad: e.target.value, total: c * precio }); }}
+                style={{ ...inp, width: 52 }} />
+              <input type="text" value={it.descripcion ?? ""} placeholder="descripción"
+                onChange={e => editar(i, { descripcion: e.target.value })}
+                style={{ ...inp, flex: 1, minWidth: 110 }} />
+              <input type="text" value={it.codigo ?? ""} placeholder="cód"
+                onChange={e => editar(i, {
+                  codigo: e.target.value,
+                  // Al cambiar el codigo se suelta el articulo resuelto, para que
+                  // vuelva a matchear con el nuevo y no quede diciendo el anterior.
+                  articulo_codigo: null, articulo_desc: null, costo_unitario: null, via_match: null, confirmado: false,
+                })}
+                style={{ ...inp, width: 58, borderColor: "#A85D43", color: "#A85D43" }} />
+              <input type="number" value={it.precio ?? ""} placeholder="precio"
+                onChange={e => { const p = Number(e.target.value) || 0; editar(i, { precio: e.target.value, total: p * cant }); }}
+                style={{ ...inp, width: 76 }} />
+              <span style={{ fontSize: 12, width: 86, textAlign: "right",
+                             color: noCuadra ? "#B3261E" : "#7A5848", fontWeight: noCuadra ? 700 : 400 }}>
+                {fmtPeso(totalLinea)}
+              </span>
+              <button onClick={() => borrarRenglon(i)} title="Quitar este renglón"
+                style={{ ...linkBtn("#C9A090"), textDecoration: "none", fontSize: 13 }}>✕</button>
+            </div>
+
+            {/* La cuenta del renglon no cierra */}
+            {noCuadra && (
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 3 }}>
+                <span style={{ fontSize: 10, color: "#B3261E" }}>
+                  ⚠ No cuadra: {cant} × {fmtPeso(precio)} = {fmtPeso(esperado)}, pero dice {fmtPeso(totalLinea)}
+                </span>
+                <button onClick={() => editar(i, { total: esperado })} style={linkBtn("#A85D43")}>
+                  usar {fmtPeso(esperado)}
+                </button>
+              </div>
             )}
-            {x.m && (x.m.estado === "conjunto" || modoConjunto[i]) && (() => {
-              const base = candidatosConjunto(x.it.descripcion, catalogo);
-              const qConj = busqConj[i] || "";
-              const extra = qConj ? buscarEnCatalogo(qConj) : [];
-              const yaSel = (selConjunto[i] || [])
-                .map(cod => (catalogo || []).find(a => canonCodigo(a.codigo) === canonCodigo(cod)))
-                .filter(Boolean);
-              const vistos = new Set();
-              const opciones = [...yaSel, ...extra, ...base].filter(o => {
-                const k = normCodigo(o.codigo);
-                if (vistos.has(k)) return false;
-                vistos.add(k); return true;
-              });
-              const sel = selConjunto[i] || [];
-              const costoSel = yaSel.reduce((s, o) => s + Number(o.costo_total || 0), 0);
-              return (
-                <div style={{ margin: "4px 0 0 0" }}>
-                  <input className="input" value={qConj}
-                    onChange={e => setBusqConj(b => ({ ...b, [i]: e.target.value }))}
-                    placeholder="Buscar más artículos por código o descripción..."
-                    style={{ width: "100%", fontSize: 11, marginBottom: 6 }} />
-                  {opciones.length === 0 && !qConj && (
-                    <p style={{ fontSize: 10, color: "#B3261E", margin: 0 }}>
-                      No encontré artículos con esas palabras — buscalos arriba
-                    </p>
+
+            {/* Matcheo */}
+            <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap", marginTop: 4 }}>
+              {it.articulo_codigo ? (
+                <>
+                  <span style={{ fontSize: 10, color: "#0B7A55", fontWeight: 600 }}>
+                    ✓ #{it.articulo_codigo} · {it.articulo_desc}
+                  </span>
+                  {costoU !== null
+                    ? <span style={{ fontSize: 10, color: "#7A5848" }}>costo {fmtPeso(costoU)}</span>
+                    : <span style={{ fontSize: 10, color: "#B3261E" }}>⚠ sin costo cargado</span>}
+                  {margenU !== null && (
+                    <span style={{ fontSize: 10, color: margenU >= 0 ? "#0B7A55" : "#B3261E" }}>
+                      margen {fmtPeso(margenU)}/u · {fmtPeso(margenU * cant)}
+                    </span>
                   )}
-                  {opciones.length > 0 && (
-                    <div>
-                      <p style={{ fontSize: 10, color: "#7A5848", margin: "0 0 3px 0" }}>
-                        Marcá los {sel.length >= 2 ? sel.length : "2 o más"} artículos que forman el conjunto:
-                      </p>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 160, overflowY: "auto" }}>
-                        {opciones.map((o, j) => {
-                          const marcado = sel.includes(o.codigo);
-                          return (
-                            <button key={j} onClick={() => toggleComponente(i, o.codigo)}
-                              style={{ background: marcado ? "#7C3AED" : "#FFF8F5",
-                                       color: marcado ? "#fff" : "#5A3828",
-                                       border: `1px solid ${marcado ? "#7C3AED" : "#D4A090"}`,
-                                       borderRadius: 6, padding: "4px 8px", fontSize: 10,
-                                       cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-                              {marcado ? "☑ " : "☐ "}<b>{o.codigo}</b> — {o.descripcion}
-                              {o.costo_total !== null ? ` · $${o.costo_total}` : " · sin costo"}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      {sel.length >= 2 && (
-                        <button onClick={() => guardarConjunto(x.it.descripcion, i)}
-                          style={{ marginTop: 6, background: "#7C3AED", color: "#fff", border: "none",
-                                   borderRadius: 6, padding: "5px 10px", fontSize: 11, cursor: "pointer",
-                                   fontFamily: "inherit", fontWeight: 600 }}>
-                          Guardar conjunto de {sel.length} · costo {fmtPeso(costoSel)}
-                        </button>
-                      )}
-                    </div>
+                  {!it.confirmado && it.via_match && (
+                    <button onClick={() => confirmar(i)}
+                      style={{ fontSize: 10, padding: "3px 9px", borderRadius: 6, cursor: "pointer",
+                               fontFamily: "inherit", fontWeight: 600, background: "#E6F7EF",
+                               color: "#0B7A55", border: "1px solid #10B981" }}>
+                      confirmar {it.via_match === "alias" ? "↩ alias" : "⌗ código"}
+                    </button>
+                  )}
+                  <button onClick={() => soltar(i)} style={linkBtn("#9A7570")}>cambiar</button>
+                </>
+              ) : m && m.candidatos.length > 0 ? (
+                <div style={{ width: "100%" }}>
+                  <p style={{ fontSize: 10, color: "#8A5A2B", margin: "0 0 4px 0" }}>
+                    {m.via === "codigo" ? "El código está en varias temporadas — elegí cuál:" : "Posibles coincidencias — elegí cuál:"}
+                  </p>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {m.candidatos.map((c, k) => (
+                      <button key={k} onClick={() => asignar(i, c.art)} style={chip(c.prob)}>
+                        <b>{c.prob}%</b>
+                        <span style={{ color: "#A85D43", marginLeft: 4 }}>#{c.art.codigo}</span>
+                        <span style={{ color: "#5A3828", marginLeft: 4 }}>{c.art.descripcion}</span>
+                        <span style={{ color: "#9A7570", marginLeft: 4 }}>
+                          · {c.art.costo_total !== null && c.art.costo_total !== undefined ? fmtPeso(c.art.costo_total) : "sin costo"}
+                        </span>
+                      </button>
+                    ))}
+                    <button onClick={() => { setBuscadorAbierto(i); setBusquedaArt(it.descripcion || ""); }}
+                      style={{ ...chip(0), color: "#A85D43", borderColor: "#A85D43" }}>buscar otro</button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <span style={{ fontSize: 10, color: "#B3261E", fontWeight: 600 }}>✕ sin artículo</span>
+                  <button onClick={() => { setBuscadorAbierto(i); setBusquedaArt(it.descripcion || ""); }}
+                    style={{ ...chip(0), color: "#A85D43", borderColor: "#A85D43" }}>elegir artículo</button>
+                </>
+              )}
+              <button onClick={() => { setConjuntoAbierto(conjuntoAbierto === i ? null : i); setConjuntoSel([]); setBusqConj(it.descripcion || ""); }}
+                style={linkBtn("#7C3AED")}>⊞ Son varios artículos</button>
+            </div>
+
+            {/* Buscador del catalogo */}
+            {buscadorAbierto === i && (
+              <div style={{ marginTop: 5, background: "#FFF0E8", borderRadius: 7, padding: 8 }}>
+                <input className="input" value={busquedaArt} onChange={e => setBusquedaArt(e.target.value)}
+                  placeholder="Buscar por código o descripción..." autoFocus
+                  style={{ width: "100%", fontSize: 12, marginBottom: 6 }} />
+                <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 180, overflowY: "auto" }}>
+                  {(busquedaArt ? buscarEnCatalogo(busquedaArt) : (m ? m.candidatos.map(c => c.art) : [])).map((a, k) => (
+                    <button key={k} onClick={() => asignar(i, a)}
+                      style={{ display: "flex", justifyContent: "space-between", gap: 8, textAlign: "left",
+                               padding: "4px 7px", borderRadius: 6, fontSize: 11, cursor: "pointer",
+                               fontFamily: "inherit", background: "#FFF8F5", border: "1px solid #E8C4B0", color: "#5A3828" }}>
+                      <span><b style={{ color: "#A85D43" }}>#{a.codigo}</b> {a.descripcion}</span>
+                      <span style={{ color: "#9A7570", whiteSpace: "nowrap" }}>
+                        {a.costo_total !== null && a.costo_total !== undefined ? fmtPeso(a.costo_total) : "sin costo"}
+                      </span>
+                    </button>
+                  ))}
+                  {busquedaArt && buscarEnCatalogo(busquedaArt).length === 0 && (
+                    <p style={{ fontSize: 10, color: "#B3261E", margin: 0 }}>Nada encontrado</p>
                   )}
                 </div>
-              );
-            })()}
+                <button onClick={() => { setBuscadorAbierto(null); setBusquedaArt(""); }}
+                  style={{ ...linkBtn("#9A7570"), marginTop: 6 }}>cerrar</button>
+              </div>
+            )}
 
-            {x.m && (x.m.estado === "revisar" || x.m.estado === "sin_match" || x.m.estado === "similar" || x.m.estado === "ambiguo") && x.m.candidatos.length > 0 && (
-              <div style={{ margin: "4px 0 0 0" }}>
-                <p style={{ fontSize: 10, color: "#7A5848", margin: "0 0 3px 0" }}>
-                  Tocá el correcto y queda recordado para siempre:
-                </p>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                  {x.m.candidatos.map((cd, j) => {
-                    const esElegido = guardado[i] === cd.codigo;
+            {/* Conjunto: varios articulos en un renglon */}
+            {conjuntoAbierto === i && (
+              <div style={{ marginTop: 5, background: "#F5F0FF", borderRadius: 7, padding: 8 }}>
+                <input className="input" value={busqConj} onChange={e => setBusqConj(e.target.value)}
+                  placeholder="Buscar los artículos que lo componen..."
+                  style={{ width: "100%", fontSize: 12, marginBottom: 6 }} />
+                <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 160, overflowY: "auto" }}>
+                  {buscarEnCatalogo(busqConj).map((a, k) => {
+                    const marcado = conjuntoSel.some(c => canonCodigo(c) === canonCodigo(a.codigo));
                     return (
-                      <button key={j} onClick={() => elegir(x.it.descripcion, cd.codigo, i)}
-                        style={{ background: esElegido ? "#10B981" : "#FFF8F5",
-                                 color: esElegido ? "#fff" : "#5A3828",
-                                 border: `1px solid ${esElegido ? "#10B981" : "#D4A090"}`,
-                                 borderRadius: 6, padding: "4px 8px", fontSize: 10,
-                                 cursor: "pointer", fontFamily: "inherit", textAlign: "left", maxWidth: "100%" }}>
-                        {esElegido ? "✓ " : ""}<b>{cd.codigo}</b> — {cd.descripcion} ({Math.round(cd.score * 100)}%)
+                      <button key={k} onClick={() => setConjuntoSel(s => marcado
+                          ? s.filter(c => canonCodigo(c) !== canonCodigo(a.codigo)) : [...s, a.codigo])}
+                        style={{ textAlign: "left", padding: "4px 7px", borderRadius: 6, fontSize: 11,
+                                 cursor: "pointer", fontFamily: "inherit",
+                                 background: marcado ? "#7C3AED" : "#FFF8F5",
+                                 color: marcado ? "#fff" : "#5A3828",
+                                 border: `1px solid ${marcado ? "#7C3AED" : "#D4C0E8"}` }}>
+                        {marcado ? "☑ " : "☐ "}<b>#{a.codigo}</b> {a.descripcion}
+                        {a.costo_total !== null && a.costo_total !== undefined ? ` · ${fmtPeso(a.costo_total)}` : " · sin costo"}
                       </button>
                     );
                   })}
                 </div>
-              </div>
-            )}
-            {guardado[i] && (
-              <p style={{ fontSize: 10, color: "#10B981", margin: "3px 0 0 0", fontWeight: 600 }}>
-                ✓ Guardado: de ahora en más "{x.it.descripcion}" va a matchear solo con {guardado[i]}
-              </p>
-            )}
-
-            {/* Corrector universal: sirve tambien cuando el match salio verde pero esta mal */}
-            {x.m && x.m.estado !== "conjunto" && (
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                <button onClick={() => { setCorrigiendo(corrigiendo === i ? null : i); setBusquedaArt(""); }}
-                  style={{ background: "none", border: "none", color: "#A85D43", cursor: "pointer",
-                           fontSize: 10, padding: "3px 0", textDecoration: "underline", fontFamily: "inherit" }}>
-                  {corrigiendo === i ? "Cerrar" : (x.m.codigo ? "No es este / cambiar" : "Buscar en el catálogo")}
-                </button>
-                <button onClick={() => {
-                    setModoConjunto(m => ({ ...m, [i]: !m[i] }));
-                    setCorrigiendo(null);
-                  }}
-                  style={{ background: "none", border: "none", color: "#7C3AED", cursor: "pointer",
-                           fontSize: 10, padding: "3px 0", textDecoration: "underline", fontFamily: "inherit" }}>
-                  {modoConjunto[i] ? "Volver a un solo artículo" : "⊞ Son varios artículos"}
-                </button>
-              </div>
-            )}
-
-            {corrigiendo === i && (
-              <div style={{ marginTop: 4, background: "#FFF0E8", borderRadius: 6, padding: 8 }}>
-                <input className="input" value={busquedaArt} onChange={e => setBusquedaArt(e.target.value)}
-                  placeholder="Buscar por código o descripción..." autoFocus
-                  style={{ width: "100%", fontSize: 12, marginBottom: 6 }} />
-                {busquedaArt && (() => {
-                  const res = buscarEnCatalogo(busquedaArt);
-                  if (!res.length) return <p style={{ fontSize: 10, color: "#B3261E", margin: 0 }}>Nada encontrado</p>;
-                  return (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 150, overflowY: "auto" }}>
-                      {res.map((o, j) => (
-                        <button key={j} onClick={() => { elegir(x.it.descripcion, o.codigo, i); setCorrigiendo(null); }}
-                          style={{ background: "#FFF8F5", color: "#5A3828", border: "1px solid #D4A090",
-                                   borderRadius: 6, padding: "4px 8px", fontSize: 10, cursor: "pointer",
-                                   fontFamily: "inherit", textAlign: "left" }}>
-                          <b>{o.codigo}</b> — {o.descripcion}
-                          {o.costo_total !== null ? ` · $${o.costo_total}` : " · sin costo"}
-                        </button>
-                      ))}
-                    </div>
-                  );
-                })()}
-                <p style={{ fontSize: 9, color: "#7A5848", marginTop: 6, marginBottom: 0 }}>
-                  Lo que elijas pisa el alias anterior de esta descripción.
-                </p>
+                {conjuntoSel.length >= 2 && (
+                  <button onClick={() => guardarConjunto(i)}
+                    style={{ marginTop: 6, background: "#7C3AED", color: "#fff", border: "none", borderRadius: 6,
+                             padding: "5px 10px", fontSize: 11, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
+                    Guardar conjunto de {conjuntoSel.length}
+                  </button>
+                )}
+                <button onClick={() => { setConjuntoAbierto(null); setConjuntoSel([]); }}
+                  style={{ ...linkBtn("#9A7570"), marginLeft: 8 }}>cerrar</button>
               </div>
             )}
           </div>
         );
       })}
 
-      {conMatch.length > 3 && (
-        <button onClick={() => setExpanded(e => !e)} style={{ background: "none", border: "none", color: "#A85D43", cursor: "pointer", fontSize: 11, padding: "4px 0", textDecoration: "underline" }}>
-          {expanded ? "Ver menos ▲" : `+${conMatch.length - 3} más... Ver todos ▼`}
-        </button>
-      )}
-
-      {extracted.descuento && <p style={{ fontSize: 11, color: "#F87171", marginTop: 4 }}>Descuento: -{fmtPeso(extracted.descuento)}</p>}
-      <p style={{ fontSize: 13, fontWeight: 700, color: "#A85D43", marginTop: 4 }}>Total: {fmtPeso(totalRemito)}</p>
-
-      {saldoAnt > 0 && (
-        <p style={{ fontSize: 11, color: "#8A5A2B", marginTop: 4, fontWeight: 600 }}>
-          Saldo anterior detectado: {fmtPeso(saldoAnt)} — no cuenta como venta ni entra en el margen
-        </p>
-      )}
-
-      {descReal !== null && descReal > 0.5 && (
-        <p style={{ fontSize: 11, color: "#7A5848", marginTop: 2 }}>
-          Items suman {fmtPeso(sumaItems)} → descuento aplicado ≈ {descReal}%
-        </p>
-      )}
-
-      {descuadre && !difEsSaldo && (
-        <p style={{ fontSize: 11, color: "#B3261E", fontWeight: 600, marginTop: 4 }}>
-          ⚠ Los items suman {fmtPeso(sumaItems)} y el subtotal dice {fmtPeso(baseCmp)} — falta o sobra alguna línea
-        </p>
-      )}
-
-      {hayCat && items.length > 0 && (
-        <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #E8C4B0" }}>
-          <p style={{ fontSize: 11, color: "#5A3828", margin: 0 }}>
-            Costo: {fmtPeso(costoTotal)} · Margen estimado: <b style={{ color: margen > 0 ? "#10B981" : "#B3261E" }}>{fmtPeso(margen)}</b>
-          </p>
-          {(sinCosto > 0 || sinMatch > 0) && (
-            <p style={{ fontSize: 10, color: "#B3261E", margin: "2px 0 0 0" }}>
-              ⚠ Margen incompleto: {sinMatch > 0 ? `${sinMatch} sin identificar` : ""}{sinMatch > 0 && sinCosto > 0 ? " · " : ""}{sinCosto > 0 ? `${sinCosto} sin costo cargado` : ""}
-            </p>
-          )}
-          {sinCosto === 0 && sinMatch === 0
-            ? <p style={{ fontSize: 10, color: "#10B981", margin: "4px 0 0 0", fontWeight: 600 }}>
-                ✓ Al guardar queda con el costo completo — suma a la ganancia
-              </p>
-            : <p style={{ fontSize: 10, color: "#8A5A2B", margin: "4px 0 0 0", fontWeight: 600 }}>
-                Si guardás así, la venta queda SIN costo y no suma a la ganancia. Resolvé los ⚠ para que cuente.
-              </p>}
-        </div>
-      )}
+      <button onClick={agregarRenglon} style={{ ...linkBtn("#A85D43"), fontSize: 11, marginTop: 2 }}>
+        + Agregar un renglón que la IA no leyó
+      </button>
 
       {errorAlias && (
-        <p style={{ fontSize: 10, color: "#B3261E", marginTop: 6 }}>
-          No se pudo guardar el alias: {errorAlias}
-        </p>
+        <p style={{ fontSize: 10, color: "#B3261E", marginTop: 6 }}>No se pudo guardar el alias: {errorAlias}</p>
       )}
 
-      {!hayCat && (
-        <p style={{ fontSize: 10, color: "#7A5848", marginTop: 6 }}>Catálogo no cargado — sin matching de artículos</p>
-      )}
+      {/* ── Resumen ── */}
+      <div style={{ marginTop: 9, paddingTop: 9, borderTop: "1px solid #E8C4B0" }}>
+        <p style={{ fontSize: 11, color: "#5A3828", margin: 0 }}>
+          Los renglones suman <b>{fmtPeso(sumaRenglones)}</b>
+          {descReal !== null && descReal > 0.5 && <span style={{ color: "#7A5848" }}> · descuento aplicado ≈ {descReal}%</span>}
+        </p>
+        <p style={{ fontSize: 13, fontWeight: 700, color: "#A85D43", margin: "3px 0 0 0" }}>
+          Total de la venta: {fmtPeso(totalRemito)}
+        </p>
+
+        {saldoAnt > 0 && (
+          <p style={{ fontSize: 11, color: "#8A5A2B", marginTop: 4, fontWeight: 600 }}>
+            Saldo anterior detectado: {fmtPeso(saldoAnt)} — no cuenta como venta ni entra en el margen
+          </p>
+        )}
+
+        {hayCat && items.length > 0 && (
+          <div style={{ marginTop: 6 }}>
+            <p style={{ fontSize: 11, color: "#5A3828", margin: 0 }}>
+              Costo: {fmtPeso(costoTotal)} · Margen:{" "}
+              <b style={{ color: margen >= 0 ? "#0B7A55" : "#B3261E" }}>{fmtPeso(margen)}</b>
+              {ventaDeEsos > 0 && <span style={{ color: "#7A5848" }}> ({Math.round(margen / ventaDeEsos * 100)}%)</span>}
+              <span style={{ color: "#9A7570" }}> · {conCosto.length} de {items.length} renglones costeados</span>
+            </p>
+            {(sinResolver > 0 || sinCostoCargado > 0) ? (
+              <p style={{ fontSize: 10, color: "#8A5A2B", margin: "4px 0 0 0", fontWeight: 600 }}>
+                Si guardás así la venta queda SIN costo y no suma a la ganancia.
+                {sinResolver > 0 ? ` Faltan resolver ${sinResolver}.` : ""}
+                {sinCostoCargado > 0 ? ` ${sinCostoCargado} sin costo cargado en Costos.` : ""}
+              </p>
+            ) : (
+              <p style={{ fontSize: 10, color: "#0B7A55", margin: "4px 0 0 0", fontWeight: 600 }}>
+                ✓ Al guardar queda con el costo completo — suma a la ganancia
+              </p>
+            )}
+          </div>
+        )}
+
+        {!hayCat && (
+          <p style={{ fontSize: 10, color: "#7A5848", marginTop: 6 }}>Catálogo no cargado — sin matching de artículos</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -2390,6 +2432,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
         mediaType: chica.mediaType || file.type || "image/jpeg",
         status: "pending",
         extracted: null,
+        renglones: [],
         form: defaultForm(),
       };
     }));
@@ -2420,6 +2463,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
         const extracted = await extraerDatosFotoBase64(base64, item.mediaType);
         setQueue(q => q.map(it => it.id === item.id ? {
           ...it, status: "done", extracted,
+          renglones: armarRenglones(extracted, catalogo, aliases),
           form: buildForm(extracted, it.form),
         } : it));
       } catch (e) {
@@ -2442,7 +2486,8 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
     setGuardandoIdx(idx);
     setSaveError(null);
 
-    const cost = costearVenta(item.extracted, catalogo, aliases);
+    // Lo que se guarda es exactamente lo que se ve en pantalla
+    const cost = costearVenta(item.renglones);
     // Los campos con _ son de pantalla, no columnas de la tabla: si se mandan,
     // Supabase rechaza el insert entero. Se filtran por prefijo y no uno por uno,
     // para que agregar un campo de pantalla nuevo no rompa el guardado.
@@ -2638,7 +2683,10 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
                     // El `key` es imprescindible: sin el, React reusa el mismo panel al pasar
                     // de una foto a otra y se arrastran las correcciones a medias de la anterior
                     // (llegaba a guardar un alias con los codigos del remito anterior).
-                    <ItemsDetectados key={activeItem.id} extracted={activeItem.extracted} fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} totalForm={activeItem.form.total} />
+                    <ItemsDetectados key={activeItem.id} extracted={activeItem.extracted}
+                      renglones={activeItem.renglones || []}
+                      setRenglones={(nuevos) => setQueue(q => q.map(it => it.id === activeItem.id ? { ...it, renglones: nuevos } : it))}
+                      fmtPeso={fmtPeso} catalogo={catalogo} aliases={aliases} guardarAlias={guardarAlias} totalForm={activeItem.form.total} />
                   )}
                 </div>
               </div>
@@ -2702,6 +2750,11 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
               {/* El total leído y la suma de los renglones no cierran: elige la persona */}
               {activeItem.form._discrepancia && (() => {
                 const d = activeItem.form._discrepancia;
+                // Se recalcula con los renglones de la pantalla: si se corrige uno,
+                // el cartel acompaña, y si ya cuadran directamente desaparece.
+                const sumaViva = (activeItem.renglones || []).reduce((s, r) => s + (Number(r.total) || 0), 0);
+                const sugerido = Math.round(sumaViva - (d.descuento || 0));
+                if (!sumaViva || Math.abs(d.leido - sugerido) <= Math.max(1, d.leido * 0.02)) return null;
                 const elegir = (valor) => {
                   updateForm(activeIdx, "total", String(valor));
                   updateForm(activeIdx, "_discrepancia", null);
@@ -2719,7 +2772,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
                       ⚠ El total del remito y la suma de los renglones no coinciden
                     </p>
                     <p style={{ fontSize: 11, color: "#7A2E28", margin: "4px 0 8px 0" }}>
-                      Se llevan {fmtPeso(Math.abs(d.leido - d.sugerido))} de diferencia. Mirá la foto y decime cuál es el bueno
+                      Se llevan {fmtPeso(Math.abs(d.leido - sugerido))} de diferencia. Mirá la foto y decime cuál es el bueno
                       {d.descuento > 0 ? ` (el remito tiene un descuento de ${fmtPeso(d.descuento)}, ya aplicado a las dos opciones)` : ""}.
                     </p>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -2727,9 +2780,9 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
                         <b>{fmtPeso(d.leido)}</b><br />
                         <span style={{ fontSize: 10 }}>el total escrito en el remito</span>
                       </button>
-                      <button onClick={() => elegir(d.sugerido)} style={btn(elegido === d.sugerido)}>
-                        <b>{fmtPeso(d.sugerido)}</b><br />
-                        <span style={{ fontSize: 10 }}>la suma de los {(activeItem.extracted?.items || []).length} renglones</span>
+                      <button onClick={() => elegir(sugerido)} style={btn(elegido === sugerido)}>
+                        <b>{fmtPeso(sugerido)}</b><br />
+                        <span style={{ fontSize: 10 }}>la suma de los {(activeItem.renglones || []).length} renglones</span>
                       </button>
                     </div>
                     <p style={{ fontSize: 10, color: "#7A2E28", margin: "6px 0 0 0" }}>
