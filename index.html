@@ -1782,10 +1782,17 @@ const PROMPT_EXTRACCION = `Analizá este presupuesto/comprobante de venta de rop
   "descuento": número de descuento aplicado o null,
   "notas": "cualquier nota relevante o null"
 }
-No leas la fecha del comprobante.
-El codigo de articulo suele ser un numero corto (1 a 4 digitos) al lado de la descripcion. Si no lo ves, poné null; NO lo inventes ni lo deduzcas de la descripcion.
-IMPORTANTE con los totales: a veces el remito suma un saldo o deuda anterior al final (puede decir "saldo", "deuda", "cta anterior", "resto"). Ese monto NO es parte de la venta: va en saldoAnterior y NO se incluye en total ni en totalConDescuento. Los campos total y totalConDescuento son solo por la mercaderia de este remito.
-Si no podés leer algún campo, poné null.`;
+REGLAS:
+- Un articulo real tiene cantidad Y descripcion escritas. Si un numero no tiene cantidad ni descripcion al lado, NO es un articulo: ignoralo.
+- Leé TODOS los renglones del remito, de arriba hasta abajo, incluso si son muchos. No cortes la lista por la mitad.
+- "descripcion": tal cual esta escrita en el remito, sin corregirla ni completarla.
+- "codigo": solo si esta escrito un numero corto (1 a 4 digitos) al lado de la descripcion. Si no lo ves, null; NO lo inventes ni lo deduzcas de la descripcion.
+- "total" de cada renglon tiene que ser cantidad x precio. Si el remito muestra otro numero, poné el que esta escrito, pero revisá que no te hayas comido un digito.
+- IMPORTANTE con los importes: no te comas los ceros ni los puntos de miles. Si un renglon dice 24.000 son veinticuatro mil, no 24. Si la suma de los renglones da 60000, el total NO puede ser 60.
+- El total del remito tiene que ser coherente con la suma de los renglones (cantidad x precio). Si no te cierra, volvé a mirar los numeros antes de responder.
+- A veces el remito suma un saldo o deuda anterior al final (puede decir "saldo", "deuda", "cta anterior", "resto"). Ese monto NO es parte de la venta: va en saldoAnterior y NO se incluye en total ni en totalConDescuento. Los campos total y totalConDescuento son solo por la mercaderia de este remito.
+- No leas la fecha del comprobante.
+- NO inventes datos. Si no podés leer algun campo, poné null.`;
 
 // Esta key quedo deshabilitada por Google ("reported as leaked") justamente por
 // estar escrita aca, en un repo publico. Se deja vacia: ya no sirve para nada y
@@ -1795,6 +1802,12 @@ const BACKUP_API_KEY = "";
 let lastKeyUsed = 0; // 0 = primary, 1 = backup
 
 const TIMEOUT_LECTURA_MS = 90000;
+
+// Modelos a probar, en orden. gemini-2.5-flash es el que usaba esta app y es dos
+// generaciones mas viejo que el que usa Criterio Local, que lee bastante mejor los
+// remitos manuscritos. Los de respaldo van al final: cada modelo tiene su propia
+// cuota, asi que cuando el primero se queda sin nafta el segundo suele andar.
+const MODELOS_GEMINI = ["gemini-3.6-flash", "gemini-flash-latest"];
 
 async function extraerDatosFotoBase64(base64, mediaType) {
   const primaryKey = localStorage.getItem("cv_apikey") || window.__geminiPrimaryKey || "";
@@ -1808,14 +1821,21 @@ async function extraerDatosFotoBase64(base64, mediaType) {
   const orderedKeys = [...keys.slice(lastKeyUsed), ...keys.slice(0, lastKeyUsed)];
   
   let lastError;
+  // Se prueba modelo por modelo y, dentro de cada uno, key por key. Cada modelo
+  // tiene su propia cuota, asi que cuando el primero se queda sin nafta el segundo
+  // suele andar. Es el mismo esquema que usa Criterio Local, que lee bastante mejor.
+  for (const modelo of MODELOS_GEMINI) {
   for (let i = 0; i < orderedKeys.length; i++) {
     const apiKey = orderedKeys[i];
-    const isNewFormat = apiKey.startsWith("AQ.");
-    const url = isNewFormat
-      ? `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`
-      : `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    // Hay DOS formatos de key y cada uno viaja distinto:
+    //   AIza... -> como parametro ?key= en la URL (las de AI Studio son asi)
+    //   AQ....  -> en el header x-goog-api-key
+    // Mandarla por la via equivocada da 400/401 aunque la key sea perfecta.
+    const esAIza = /^AIza/i.test(apiKey);
+    const base = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`;
+    const url = esAIza ? `${base}?key=${encodeURIComponent(apiKey)}` : base;
     const headers = { "Content-Type": "application/json" };
-    if (isNewFormat) headers["x-goog-api-key"] = apiKey;
+    if (!esAIza) headers["x-goog-api-key"] = apiKey;
 
     // Timeout. Sin esto, si la peticion se traba la foto queda en "Leyendo
     // comprobante..." para siempre y no hay forma de que salga sola: hay que
@@ -1847,24 +1867,38 @@ async function extraerDatosFotoBase64(base64, mediaType) {
 
     let data;
     try { data = await resp.json(); } catch(e) { lastError = new Error("HTTP " + resp.status); continue; }
+
     if (resp.status === 429 || (data.error && data.error.code === 429)) {
-      // Se prueba con la siguiente key. El mensaje esta redactado para que sirva
-      // tambien si esta era la ultima: antes el error final decia "intentando con
-      // otra key...", que suena a esperar cuando en realidad ya no habia mas.
+      // El 429 son DOS cosas muy distintas y no se resuelven igual:
+      //   · por minuto -> se repone en segundos, conviene esperar. Pasa al leer
+      //     varias fotos seguidas, que es justo lo que se hace al cargar un lote.
+      //   · por dia    -> no se repone hasta mañana, hay que cambiar de key.
+      const txt = JSON.stringify(data.error || "");
+      const porMinuto = /per ?minute|PerMinute|RequestsPerMinute/i.test(txt);
       lastKeyUsed = (lastKeyUsed + 1) % keys.length;
-      lastError = new Error(`Sin cuota en las ${keys.length} API key(s) de Gemini. Esperá un rato o agregá otra key en Config.`);
+      lastError = porMinuto
+        ? new Error("Se leyeron muchas fotos muy seguido. Esperá unos segundos y tocá Reintentar.")
+        : new Error(`Se agotó la cuota diaria de las ${keys.length} API key(s) de Gemini. Agregá otra key en Config o seguí mañana.`);
       continue;
     }
     if (!resp.ok || data.error) {
-      lastError = new Error("API " + resp.status + ": " + (data.error?.message || JSON.stringify(data).slice(0, 120)));
+      // 500/503 = el modelo esta saturado, no es problema de la key
+      const codigo = data.error?.code || resp.status;
+      lastError = codigo >= 500
+        ? new Error("Gemini está saturado en este momento. Probá de nuevo con Reintentar.")
+        : new Error("API " + codigo + ": " + (data.error?.message || JSON.stringify(data).slice(0, 120)));
       continue;
     }
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    if (!text) { lastError = new Error("Respuesta vacía."); continue; }
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) { lastError = new Error("Sin JSON: " + text.slice(0, 80)); continue; }
+    // Las partes se unen: a veces la respuesta viene partida en varias y quedarse
+    // con la primera cortaba el JSON por la mitad.
+    const text = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || "").join("");
+    if (!text.trim()) { lastError = new Error("Respuesta vacía."); continue; }
+    const limpio = text.replace(/```json|```/g, "").trim();
+    const match = limpio.match(/\{[\s\S]*\}/);
+    if (!match) { lastError = new Error("Sin JSON: " + limpio.slice(0, 80)); continue; }
     try { return JSON.parse(match[0]); }
     catch(e) { lastError = new Error("JSON inválido"); continue; }
+  }
   }
   throw lastError || new Error("No se pudo procesar la imagen");
 }
