@@ -1830,7 +1830,54 @@ const TIMEOUT_LECTURA_MS = 90000;
 // cuota, asi que cuando el primero se queda sin nafta el segundo suele andar.
 const MODELOS_GEMINI = ["gemini-3.6-flash", "gemini-flash-latest"];
 
+// Intenta leer por el servidor (/api/gemini). Ahi la key vive en las variables de
+// entorno y nunca llega al navegador, que es como lo hace Criterio Local y por lo
+// cual a el Google nunca se la deshabilito.
+// En GitHub Pages ese endpoint no existe y devuelve 404: en ese caso se avisa que
+// no hay servidor y se sigue por el camino viejo, con la key del dispositivo.
+async function leerPorServidor(base64, mediaType) {
+  let resp;
+  try {
+    const control = new AbortController();
+    const reloj = setTimeout(() => control.abort(), TIMEOUT_LECTURA_MS);
+    resp = await fetch("/api/gemini", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: control.signal,
+      body: JSON.stringify({ base64, prompt: PROMPT_EXTRACCION, mimeType: mediaType }),
+    });
+    clearTimeout(reloj);
+  } catch (e) {
+    // Si ni siquiera se pudo llegar, puede ser que no haya servidor: se prueba el otro camino
+    return { hayServidor: false };
+  }
+  if (resp.status === 404 || resp.status === 405) return { hayServidor: false };
+
+  let data;
+  try { data = await resp.json(); }
+  catch { return { hayServidor: false }; }  // GitHub Pages responde HTML, no JSON
+
+  if (data && data.ok && data.texto) {
+    const limpio = String(data.texto).replace(/```json|```/g, "").trim();
+    const m = limpio.match(/\{[\s\S]*\}/);
+    if (m) {
+      try { return { hayServidor: true, datos: JSON.parse(m[0]) }; } catch (e) {}
+    }
+    return { hayServidor: true, error: "El lector devolvió algo que no se pudo interpretar." };
+  }
+  // El servidor existe y contesto un error de verdad: no tiene sentido reintentar
+  // con la key del navegador, el problema es de las keys del servidor.
+  return { hayServidor: true, error: (data && data.error) || `HTTP ${resp.status}` };
+}
+
 async function extraerDatosFotoBase64(base64, mediaType) {
+  const porServidor = await leerPorServidor(base64, mediaType);
+  if (porServidor.hayServidor) {
+    if (porServidor.datos) return porServidor.datos;
+    throw new Error(porServidor.error);
+  }
+
+  // Sin servidor: camino de siempre, con la key guardada en este dispositivo.
   const primaryKey = localStorage.getItem("cv_apikey") || window.__geminiPrimaryKey || "";
   const savedExtra = localStorage.getItem("cv_extrakeys") || window.__geminiExtraKeys || "";
   const extraKeys = savedExtra.split("\n").map(k => k.trim()).filter(Boolean);
