@@ -885,6 +885,7 @@ function App({ onLogout, rol }) {
 function Articulos({ ventaItems, ventas, catalogo, fmtPeso, MESES, getMonthKey }) {
   const [orden, setOrden] = useState("unidades");
   const [periodo, setPeriodo] = useState("todo");
+  const [busca, setBusca] = useState("");
   const [verFondo, setVerFondo] = useState(false);
   const [soloConHistoria, setSoloConHistoria] = useState(true);
 
@@ -924,6 +925,7 @@ function Articulos({ ventaItems, ventas, catalogo, fmtPeso, MESES, getMonthKey }
     if (!mk) return periodo === "todo";
     if (periodo === "todo") return true;
     if (periodo === "mes") return mk === mesActual;
+    if (periodo === "2") return mk >= haceMeses(1);
     if (periodo === "3") return mk >= haceMeses(2);
     if (periodo === "12") return mk >= haceMeses(11);
     return true;
@@ -979,7 +981,12 @@ function Articulos({ ventaItems, ventas, catalogo, fmtPeso, MESES, getMonthKey }
   const base = (porcentual && soloConHistoria)
     ? ordenados.filter(a => a.ops >= 3)
     : ordenados;
-  const mostrados = verFondo ? [...base].reverse() : base;
+  // El codigo se compara en forma canonica, asi escribir "728l" o "l728" encuentra
+  // al mismo articulo, igual que en el buscador del panel de carga.
+  const q = busca.trim();
+  const filtrados = !q ? base : base.filter(a =>
+    canonCodigo(a.codigo).includes(canonCodigo(q)) || normTexto(a.descripcion).includes(normTexto(q)));
+  const mostrados = verFondo ? [...filtrados].reverse() : filtrados;
 
   const totUnid = agregado.arr.reduce((s, a) => s + a.unidades, 0);
   const totFact = agregado.arr.reduce((s, a) => s + a.facturacion, 0);
@@ -1035,10 +1042,24 @@ function Articulos({ ventaItems, ventas, catalogo, fmtPeso, MESES, getMonthKey }
 
         <div style={{ display: "flex", gap: 5, marginLeft: "auto", flexWrap: "wrap" }}>
           <button onClick={() => setPeriodo("mes")} style={btn(periodo === "mes")}>Este mes</button>
+          <button onClick={() => setPeriodo("2")} style={btn(periodo === "2")}>2 meses</button>
           <button onClick={() => setPeriodo("3")} style={btn(periodo === "3")}>3 meses</button>
           <button onClick={() => setPeriodo("12")} style={btn(periodo === "12")}>12 meses</button>
           <button onClick={() => setPeriodo("todo")} style={btn(periodo === "todo")}>Todo</button>
         </div>
+      </div>
+
+      <div className="card" style={{ padding: "10px 16px" }}>
+        <input className="input" value={busca} onChange={e => setBusca(e.target.value)}
+          placeholder="Buscar artículo por código o descripción..."
+          style={{ width: "100%", fontSize: 14 }} />
+        {busca.trim() && (
+          <p style={{ fontSize: 11, color: "#7A5848", margin: "6px 0 0 0" }}>
+            {mostrados.length === 0
+              ? "Ningún artículo vendido coincide con eso"
+              : `${mostrados.length} artículo${mostrados.length !== 1 ? "s" : ""} · ${mostrados.reduce((s, a) => s + a.unidades, 0)} unidades · ${fmtPeso(mostrados.reduce((s, a) => s + a.facturacion, 0))}`}
+          </p>
+        )}
       </div>
 
       <div className="card" style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", padding: "10px 16px" }}>
