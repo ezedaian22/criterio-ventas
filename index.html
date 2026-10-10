@@ -842,7 +842,7 @@ function App({ onLogout, rol }) {
           <div style={{ display: "flex", gap: 0, marginTop: 8, overflowX: "auto", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
             {(esDeposito
               ? [["clientes","Clientes"]]
-              : [["dashboard","Dashboard"],["nueva","Nueva Venta"],["resumen","Resumen"],["comisiones","Comisiones"],["historial","Historial"],["articulos","Artículos"],["clientes","Clientes"],["comparar","Comparar"],["config","Config"]]
+              : [["dashboard","Dashboard"],["nueva","Nueva Venta"],["resumen","Resumen"],["comisiones","Comisiones"],["historial","Historial"],["articulos","Venta por artículos"],["clientes","Clientes"],["comparar","Comparar"],["config","Config"]]
              ).map(([k,l]) => (
               <button key={k} className={`tab-btn ${tab===k?"active":""}`} onClick={() => setTab(k)}>{l}</button>
             ))}
