@@ -89,19 +89,25 @@ module.exports = async function handler(req, res) {
     return { texto };
   }
 
-  // Cambiar de key es la salida rapida: cada una es un cupo distinto y la respuesta
-  // es inmediata. Reintentar sobre la misma multiplica el tiempo por la cantidad de
-  // keys. Por eso: una vuelta rapida por todas, y solo si todas fallaron por algo
-  // temporal, una segunda vuelta tras una pausa corta. Con limite de tiempo.
-  const limite = Date.now() + 45000;
+  // Cada tipo de falla se resuelve de una manera distinta, y confundirlas cuesta
+  // minutos de espera:
+  //   · 503 "high demand" -> el MODELO esta saturado, no la key. Probar las otras
+  //     7 keys contra el mismo modelo es tiempo tirado: hay que saltar al modelo
+  //     siguiente de inmediato. (Esto es lo que antes se comia los 45 segundos y
+  //     hacia que nunca se llegara al modelo de respaldo.)
+  //   · 429 de cuota     -> ahi SI importa la key: se sigue con la de al lado.
+  // Despues de recorrer todos los modelos, si todo fue saturacion, una segunda
+  // vuelta tras una pausa corta, porque los picos duran poco.
+  const limite = Date.now() + 40000;
+  let huboSaturacion = false;
 
-  for (let vuelta = 0; vuelta < 2; vuelta++) {
+  for (let vuelta = 0; vuelta < 2 && Date.now() < limite; vuelta++) {
     if (vuelta > 0) {
-      const temporales = Object.values(porKey).some((f) => /límite por minuto|HTTP 5/.test(f));
-      if (!temporales || Date.now() > limite) break;
-      await esperar(2500);
+      if (!huboSaturacion) break;
+      await esperar(3000);
     }
     for (const modelo of modelos) {
+      if (Date.now() > limite) break;
       for (let i = 0; i < keys.length; i++) {
         if (Date.now() > limite) break;
         try {
@@ -113,6 +119,8 @@ module.exports = async function handler(req, res) {
           }
           ultimoError = `${r.fallo} (${modelo}, key ${i + 1})`;
           porKey[`key${i + 1}`] = r.fallo;
+          // Modelo saturado: no insistir con las demas keys, pasar al modelo siguiente
+          if (/HTTP 5/.test(r.fallo)) { huboSaturacion = true; break; }
         } catch (err) {
           ultimoError = err.message || String(err);
           porKey[`key${i + 1}`] = `no se pudo enviar: ${ultimoError}`;
@@ -123,10 +131,19 @@ module.exports = async function handler(req, res) {
 
   const fallos = Object.values(porKey);
 
+  // Saturacion: es de los servidores de Google, no de esta cuenta ni de cuantas
+  // fotos se leyeron. Se dice asi de claro porque "high demand" en ingles hace
+  // pensar que uno se paso de algo, y no es eso.
+  if (huboSaturacion) {
+    return res.status(502).json({
+      error: "Gemini está saturado en este momento (es de Google, no de tus fotos ni de tu cuota). Suele durar poco: esperá unos segundos y tocá Reintentar.",
+      detalle: ultimoError, porKey, reintentable: true,
+    });
+  }
   // El limite por minuto se repone solo: decir que espere, no que cargue a mano.
   if (fallos.length > 0 && fallos.every((f) => /límite por minuto/.test(f))) {
     return res.status(502).json({
-      error: 'El lector está ocupado en este momento. Esperá unos segundos y tocá "Reintentar".',
+      error: "Se leyeron muchas fotos muy seguido. Esperá unos segundos y tocá Reintentar.",
       detalle: ultimoError, porKey, reintentable: true,
     });
   }

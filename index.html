@@ -1888,11 +1888,24 @@ async function leerPorServidor(base64, mediaType) {
   }
   // El servidor existe y contesto un error de verdad: no tiene sentido reintentar
   // con la key del navegador, el problema es de las keys del servidor.
-  return { hayServidor: true, error: (data && data.error) || `HTTP ${resp.status}` };
+  return {
+    hayServidor: true,
+    error: (data && data.error) || `HTTP ${resp.status}`,
+    reintentable: !!(data && data.reintentable),
+  };
 }
 
 async function extraerDatosFotoBase64(base64, mediaType) {
-  const porServidor = await leerPorServidor(base64, mediaType);
+  let porServidor = await leerPorServidor(base64, mediaType);
+
+  // Saturacion de Gemini: son picos de los servidores de Google y duran poco.
+  // Se reintenta solo, hasta dos veces, en vez de hacer tocar "Reintentar" a mano.
+  for (let intento = 0; intento < 2 && porServidor.hayServidor
+       && !porServidor.datos && porServidor.reintentable; intento++) {
+    await new Promise(r => setTimeout(r, 4000 + intento * 4000));
+    porServidor = await leerPorServidor(base64, mediaType);
+  }
+
   if (porServidor.hayServidor) {
     if (porServidor.datos) return porServidor.datos;
     throw new Error(porServidor.error);
