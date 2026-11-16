@@ -1845,7 +1845,7 @@ let lastKeyUsed = 0; // 0 = primary, 1 = backup
 
 // Mas largo que el presupuesto del servidor (115s), para que cuando algo falla
 // gane el mensaje explicado del servidor y no un timeout seco del navegador.
-const TIMEOUT_LECTURA_MS = 135000;
+const TIMEOUT_LECTURA_MS = 125000;
 
 // Modelos a probar, en orden. gemini-2.5-flash es el que usaba esta app y es dos
 // generaciones mas viejo que el que usa Criterio Local, que lee bastante mejor los
@@ -1874,8 +1874,11 @@ async function leerPorServidor(base64, mediaType) {
     // Abortado por tiempo: el servidor ESTA, solo que tardo. Tratarlo como "no hay
     // servidor" mandaba a reintentar con la key del navegador y confundia el error.
     if (e.name === "AbortError") {
-      return { hayServidor: true, reintentable: true,
-               error: "La lectura tardó demasiado. Gemini está lento en este momento; probá de nuevo en un rato." };
+      // reintentable:false A PROPOSITO. Si ya espero el timeout entero, reintentar
+      // solo multiplica la espera: con dos reintentos serian varios minutos mirando
+      // "Leyendo comprobante...". Mejor avisar y que la persona decida.
+      return { hayServidor: true, reintentable: false,
+               error: "La lectura tardó demasiado y se cortó. Gemini está lento en este momento — probá con Reintentar en un rato." };
     }
     // Cualquier otra falla de red: puede que no haya servidor, se prueba el otro camino
     return { hayServidor: false };
@@ -1906,10 +1909,13 @@ async function leerPorServidor(base64, mediaType) {
 async function extraerDatosFotoBase64(base64, mediaType) {
   let porServidor = await leerPorServidor(base64, mediaType);
 
-  // Saturacion de Gemini: son picos de los servidores de Google y duran poco.
-  // Se reintenta solo, hasta dos veces, en vez de hacer tocar "Reintentar" a mano.
-  for (let intento = 0; intento < 2 && porServidor.hayServidor
-       && !porServidor.datos && porServidor.reintentable; intento++) {
+  // Saturacion de Gemini: son picos de los servidores de Google, duran poco y el
+  // servidor falla rapido en ese caso. Se reintenta solo, pero con un tope de
+  // tiempo TOTAL: sin eso, dos reintentos de una lectura lenta son varios minutos
+  // en "Leyendo comprobante...".
+  const finReintentos = Date.now() + 60000;
+  for (let intento = 0; intento < 2 && porServidor.hayServidor && !porServidor.datos
+       && porServidor.reintentable && Date.now() < finReintentos; intento++) {
     await new Promise(r => setTimeout(r, 4000 + intento * 4000));
     porServidor = await leerPorServidor(base64, mediaType);
   }
