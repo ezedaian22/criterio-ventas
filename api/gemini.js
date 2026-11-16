@@ -12,6 +12,12 @@ const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 // propia cuota, asi que cuando el primero se queda sin nafta el segundo suele andar.
 const RESPALDOS = ["gemini-3.6-flash", "gemini-flash-latest"];
 
+// Cuanto se le aguanta a UN intento antes de abandonarlo y probar el siguiente
+// modelo. Una lectura normal tarda unos 10 segundos, pero cuando Gemini esta
+// degradado se la vio tardar 40 a 77 y TERMINAR BIEN. Por eso es generoso: cortar
+// a los 25 hubiera convertido lecturas lentas pero buenas en errores.
+const TIMEOUT_INTENTO_MS = 55000;
+
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Solo POST" });
 
@@ -46,17 +52,35 @@ module.exports = async function handler(req, res) {
     const cabeceras = { "Content-Type": "application/json" };
     if (!esAIza) cabeceras["x-goog-api-key"] = apiKey;
 
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: cabeceras,
-      body: JSON.stringify({
-        contents: [{ parts: [
-          { inline_data: { mime_type: mimeType || "image/jpeg", data: base64 } },
-          { text: prompt },
-        ] }],
-        generationConfig: { temperature: 0.1 },
-      }),
-    });
+    // Timeout por intento. Sin esto, el presupuesto general no sirve de nada: solo
+    // se chequea ENTRE intentos, asi que una sola llamada lenta se lo come entero
+    // y la foto queda "leyendo" dos minutos. Cuando un intento tarda mas que esto,
+    // conviene abandonarlo y probar el modelo siguiente.
+    const control = new AbortController();
+    const reloj = setTimeout(() => control.abort(), TIMEOUT_INTENTO_MS);
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: "POST",
+        headers: cabeceras,
+        signal: control.signal,
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { inline_data: { mime_type: mimeType || "image/jpeg", data: base64 } },
+            { text: prompt },
+          ] }],
+          generationConfig: { temperature: 0.1 },
+        }),
+      });
+    } catch (e) {
+      clearTimeout(reloj);
+      // Un intento abortado se trata como saturacion: no sirve insistir con las
+      // demas keys del mismo modelo, conviene pasar al siguiente.
+      return e.name === "AbortError"
+        ? { fallo: `HTTP 504 (tardó más de ${Math.round(TIMEOUT_INTENTO_MS / 1000)}s)`, saturado: true }
+        : { fallo: `no se pudo conectar: ${e.message || String(e)}` };
+    }
+    clearTimeout(reloj);
 
     let data;
     try { data = await resp.json(); }
@@ -98,7 +122,8 @@ module.exports = async function handler(req, res) {
   //   · 429 de cuota     -> ahi SI importa la key: se sigue con la de al lado.
   // Despues de recorrer todos los modelos, si todo fue saturacion, una segunda
   // vuelta tras una pausa corta, porque los picos duran poco.
-  const limite = Date.now() + 40000;
+  // Alcanza para dos intentos completos de 55s sin cortar uno por la mitad.
+  const limite = Date.now() + 115000;
   let huboSaturacion = false;
 
   for (let vuelta = 0; vuelta < 2 && Date.now() < limite; vuelta++) {

@@ -1843,7 +1843,9 @@ REGLAS:
 const BACKUP_API_KEY = "";
 let lastKeyUsed = 0; // 0 = primary, 1 = backup
 
-const TIMEOUT_LECTURA_MS = 90000;
+// Mas largo que el presupuesto del servidor (115s), para que cuando algo falla
+// gane el mensaje explicado del servidor y no un timeout seco del navegador.
+const TIMEOUT_LECTURA_MS = 135000;
 
 // Modelos a probar, en orden. gemini-2.5-flash es el que usaba esta app y es dos
 // generaciones mas viejo que el que usa Criterio Local, que lee bastante mejor los
@@ -1869,7 +1871,13 @@ async function leerPorServidor(base64, mediaType) {
     });
     clearTimeout(reloj);
   } catch (e) {
-    // Si ni siquiera se pudo llegar, puede ser que no haya servidor: se prueba el otro camino
+    // Abortado por tiempo: el servidor ESTA, solo que tardo. Tratarlo como "no hay
+    // servidor" mandaba a reintentar con la key del navegador y confundia el error.
+    if (e.name === "AbortError") {
+      return { hayServidor: true, reintentable: true,
+               error: "La lectura tardó demasiado. Gemini está lento en este momento; probá de nuevo en un rato." };
+    }
+    // Cualquier otra falla de red: puede que no haya servidor, se prueba el otro camino
     return { hayServidor: false };
   }
   if (resp.status === 404 || resp.status === 405) return { hayServidor: false };
@@ -2005,10 +2013,6 @@ async function extraerDatosFotoBase64(base64, mediaType) {
   throw lastError || new Error("No se pudo procesar la imagen");
 }
 
-// Las fotos del celular vienen en 4000px y se mandaban ENTERAS a Gemini, ademas
-// en base64, que pesa un 33% mas, y de a 3 en paralelo. Varios MB por foto: eso
-// es lo que hacia que la lectura tardara una eternidad o se trabara.
-// A 2000px la letra manuscrita se lee igual de bien y el archivo pesa una fraccion.
 const MAX_LADO = 2000;
 function achicarImagen(dataUrl) {
   return new Promise((resolve) => {
@@ -2387,6 +2391,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
   const [guardandoIdx, setGuardandoIdx] = useState(null);
   const [saveError, setSaveError] = useState(null);
   const [manualError, setManualError] = useState(null);
+  const [errorCarga, setErrorCarga] = useState(null);
   const [fotoAmpliada, setFotoAmpliada] = useState(null);
   const [zoom, setZoom] = useState(1);
 
@@ -2500,23 +2505,40 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
   // Leer archivos como dataUrl (base64) — funciona en todos los entornos
   const addFiles = async (files) => {
     const arr = Array.from(files);
-    const newItems = await Promise.all(arr.map(async (file) => {
+    setErrorCarga(null);
+    const nuevo = (dataUrl, mediaType) => ({
+      id: Date.now() + Math.random(),
+      dataUrl, mediaType,
+      status: "pending",
+      extracted: null,
+      renglones: [],
+      form: defaultForm(),
+    });
+
+    const porArchivo = await Promise.all(arr.map(async (file) => {
+      const esPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
       const original = await new Promise((res) => {
         const r = new FileReader();
         r.onload = () => res(r.result);
         r.readAsDataURL(file);
       });
+
+      // El PDF va tal cual: Gemini lo lee igual de bien que una foto y no tarda
+      // mas (medido). No se achica porque no es una imagen, asi que si viene muy
+      // pesado se avisa, que es lo unico que puede hacer lento el envio.
+      if (esPdf) {
+        const mb = Math.round(file.size / 1024 / 1024 * 10) / 10;
+        if (mb > 6) {
+          setErrorCarga(`"${file.name}" pesa ${mb} MB y puede tardar bastante en leerse. Si tarda mucho, sacale una foto al remito en vez de usar el PDF.`);
+        }
+        return [nuevo(original, "application/pdf")];
+      }
+
       const chica = await achicarImagen(original);
-      return {
-        id: Date.now() + Math.random(),
-        dataUrl: chica.dataUrl,
-        mediaType: chica.mediaType || file.type || "image/jpeg",
-        status: "pending",
-        extracted: null,
-        renglones: [],
-        form: defaultForm(),
-      };
+      return [nuevo(chica.dataUrl, chica.mediaType || file.type || "image/jpeg")];
     }));
+    const newItems = porArchivo.flat();
+    if (!newItems.length) return;
     setQueue(q => {
       const updated = [...q, ...newItems];
       // Si no hay activo, activar el primero
@@ -2656,11 +2678,11 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
       <div className="card" style={{ textAlign: "center" }}>
         <p style={{ fontSize: 11, color: "#6B4A3E", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 14 }}>Cargar comprobantes</p>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
-          <input ref={fileRefMulti} type="file" accept="image/*" multiple style={{ display: "none" }}
+          <input ref={fileRefMulti} type="file" accept="image/*,application/pdf,.pdf" multiple style={{ display: "none" }}
             onChange={e => { addFiles(e.target.files); e.target.value = ""; }} />
           <button className="btn btn-primary" onClick={() => fileRefMulti.current?.click()}
             style={{ padding: "14px 24px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>
-            🖼️ Elegir fotos (múltiples)
+            🖼️ Elegir fotos o PDF
           </button>
           <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }}
             onChange={e => { addFiles(e.target.files); e.target.value = ""; }} />
@@ -2673,7 +2695,7 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
             ✏️ Carga manual
           </button>
         </div>
-        <p style={{ fontSize: 12, color: "#7A5848", marginTop: 10 }}>Seleccioná todas las fotos del día de una vez — desde el carrete o reenviadas de WhatsApp</p>
+        <p style={{ fontSize: 12, color: "#7A5848", marginTop: 10 }}>Seleccioná todo el lote del día de una vez: fotos del carrete o los PDF que baja WhatsApp Web. Cada página del PDF entra como un remito aparte.</p>
 
         {/* Mes del lote */}
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #E8C4B0" }}>
@@ -2688,6 +2710,12 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
             </p>
           )}
         </div>
+        {errorCarga && (
+          <p style={{ marginTop: 10, fontSize: 12, color: "#B3261E", fontWeight: 600,
+                      background: "#FFE8E4", borderRadius: 8, padding: "8px 10px" }}>
+            {errorCarga}
+          </p>
+        )}
         {savedCount > 0 && <p style={{ marginTop: 10, fontSize: 13, color: "#10B981", fontWeight: 600 }}>✓ {savedCount} {savedCount === 1 ? "venta guardada" : "ventas guardadas"}</p>}
       </div>
 
@@ -2701,7 +2729,13 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
                 style={{ position: "relative", flexShrink: 0, width: 64, height: 64, borderRadius: 8, overflow: "hidden", cursor: "pointer",
                   border: `2px solid ${activeIdx === idx ? "#A85D43" : item.status === "done" ? "#10B981" : item.status === "error" ? "#F87171" : "#D4A090"}`,
                   transition: "border 0.2s" }}>
-                <img src={item.dataUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                {item.mediaType === "application/pdf"
+                  ? <div style={{ width: "100%", height: "100%", background: "#FFF0E8", display: "flex",
+                                  flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                      <span style={{ fontSize: 20 }}>📄</span>
+                      <span style={{ fontSize: 8, color: "#A85D43", fontWeight: 700 }}>PDF</span>
+                    </div>
+                  : <img src={item.dataUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
                 <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center" }}>
                   {item.status === "processing" && <><span className="loading-dot"/><span className="loading-dot"/><span className="loading-dot"/></>}
                   {item.status === "done" && <span style={{ fontSize: 20, color: "#10B981" }}>✓</span>}
@@ -2737,13 +2771,20 @@ function NuevaVenta({ vendedoras, clientes, addVenta, fmtPeso, catalogo, aliases
               {/* Preview + datos */}
               <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
                 <div style={{ flexShrink: 0, textAlign: "center" }}>
-                  <img src={activeItem.dataUrl} alt="" onClick={() => { setFotoAmpliada(activeItem.dataUrl); setZoom(1); }}
-                    style={{ width: 90, height: 90, objectFit: "cover", borderRadius: 8, border: "1px solid #2A2A3E", cursor: "zoom-in", display: "block" }} />
-                  <button onClick={() => { setFotoAmpliada(activeItem.dataUrl); setZoom(1); }}
+                  {activeItem.mediaType === "application/pdf"
+                    ? <div style={{ width: 90, height: 90, borderRadius: 8, border: "1px solid #D4A090",
+                                    background: "#FFF0E8", display: "flex", flexDirection: "column",
+                                    alignItems: "center", justifyContent: "center" }}>
+                        <span style={{ fontSize: 30 }}>📄</span>
+                        <span style={{ fontSize: 9, color: "#A85D43", fontWeight: 700 }}>PDF</span>
+                      </div>
+                    : <img src={activeItem.dataUrl} alt="" onClick={() => { setFotoAmpliada(activeItem.dataUrl); setZoom(1); }}
+                        style={{ width: 90, height: 90, objectFit: "cover", borderRadius: 8, border: "1px solid #2A2A3E", cursor: "zoom-in", display: "block" }} />}
+                  {activeItem.mediaType !== "application/pdf" && <button onClick={() => { setFotoAmpliada(activeItem.dataUrl); setZoom(1); }}
                     style={{ background: "none", border: "none", color: "#A85D43", cursor: "pointer", fontSize: 10,
                              padding: "3px 0", textDecoration: "underline", fontFamily: "inherit" }}>
                     🔍 Ver grande
-                  </button>
+                  </button>}
                 </div>
                 <div style={{ flex: 1 }}>
                   {activeItem.status === "processing" && (
