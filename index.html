@@ -1859,18 +1859,20 @@ const MODELOS_GEMINI = ["gemini-3.6-flash", "gemini-flash-latest"];
 // En GitHub Pages ese endpoint no existe y devuelve 404: en ese caso se avisa que
 // no hay servidor y se sigue por el camino viejo, con la key del dispositivo.
 async function leerPorServidor(base64, mediaType) {
+  // El reloj cubre TODA la lectura, cabeceras y cuerpo: si se apaga al llegar las
+  // cabeceras, un cuerpo que nunca termina de bajar deja la foto colgada para siempre.
+  const control = new AbortController();
+  const reloj = setTimeout(() => control.abort(), TIMEOUT_LECTURA_MS);
   let resp;
   try {
-    const control = new AbortController();
-    const reloj = setTimeout(() => control.abort(), TIMEOUT_LECTURA_MS);
     resp = await fetch("/api/gemini", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: control.signal,
       body: JSON.stringify({ base64, prompt: PROMPT_EXTRACCION, mimeType: mediaType }),
     });
-    clearTimeout(reloj);
   } catch (e) {
+    clearTimeout(reloj);
     // Abortado por tiempo: el servidor ESTA, solo que tardo. Tratarlo como "no hay
     // servidor" mandaba a reintentar con la key del navegador y confundia el error.
     if (e.name === "AbortError") {
@@ -1883,11 +1885,12 @@ async function leerPorServidor(base64, mediaType) {
     // Cualquier otra falla de red: puede que no haya servidor, se prueba el otro camino
     return { hayServidor: false };
   }
-  if (resp.status === 404 || resp.status === 405) return { hayServidor: false };
+  if (resp.status === 404 || resp.status === 405) { clearTimeout(reloj); return { hayServidor: false }; }
 
   let data;
   try { data = await resp.json(); }
-  catch { return { hayServidor: false }; }  // GitHub Pages responde HTML, no JSON
+  catch { clearTimeout(reloj); return { hayServidor: false }; }  // GitHub Pages responde HTML, no JSON
+  clearTimeout(reloj);
 
   if (data && data.ok && data.texto) {
     const limpio = String(data.texto).replace(/```json|```/g, "").trim();
