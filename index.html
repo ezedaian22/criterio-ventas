@@ -1828,7 +1828,11 @@ REGLAS:
 - Un articulo real tiene cantidad Y descripcion escritas. Si un numero no tiene cantidad ni descripcion al lado, NO es un articulo: ignoralo.
 - Leé TODOS los renglones del remito, de arriba hasta abajo, incluso si son muchos. No cortes la lista por la mitad.
 - "descripcion": tal cual esta escrita en el remito, sin corregirla ni completarla.
-- "codigo": solo si esta escrito un numero corto (1 a 4 digitos) al lado de la descripcion. Si no lo ves, null; NO lo inventes ni lo deduzcas de la descripcion.
+- "codigo": un numero corto de 1 a 4 digitos (a veces con una letra pegada, como 851L o L728) que identifica el articulo.
+MUY IMPORTANTE: en estos remitos el codigo casi siempre va AL FINAL de la descripcion, no en una columna aparte.
+Ejemplos: "Remeras comb. 904" -> codigo "904"; "OXFORD. 851L" -> codigo "851L"; "Bermuda naut. 1006" -> codigo "1006"; "Rompeviento 34" -> codigo "34".
+Puede ir tambien al principio o en su propia columna. Donde este, poné ese numero en "codigo" y dejá "descripcion" tal cual esta escrita, con el numero incluido.
+Si NO hay ningun numero de ese tipo, poné null; no lo inventes. Y no confundas el codigo con la cantidad (va al principio del renglon) ni con el precio (va a la derecha, en miles).
 - "total" de cada renglon tiene que ser cantidad x precio. Si el remito muestra otro numero, poné el que esta escrito, pero revisá que no te hayas comido un digito.
 - IMPORTANTE con los importes: no te comas los ceros ni los puntos de miles. Si un renglon dice 24.000 son veinticuatro mil, no 24. Si la suma de los renglones da 60000, el total NO puede ser 60.
 - El total del remito tiene que ser coherente con la suma de los renglones (cantidad x precio). Si no te cierra, volvé a mirar los numeros antes de responder.
