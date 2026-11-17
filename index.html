@@ -1449,6 +1449,7 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
   const mesHoy = new Date().getMonth();
   const [anio, setAnio] = useState(anioHoy);
   const [verPct, setVerPct] = useState(true);
+  const [verVend, setVerVend] = useState(true);
 
   const fmtCorto = (n) => {
     const v = Number(n || 0);
@@ -1485,6 +1486,31 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
   const dm = (a, i) => porMes[`${a}-${String(i + 1).padStart(2, "0")}`] || { total: 0, comision: 0, ops: 0, ganancia: 0, costo: 0, conCosto: 0 };
   const sumaAnio = (a, campo) => MESES.reduce((s, _, i) => s + dm(a, i)[campo], 0);
   const pct = (a, b) => (!b ? null : Math.round(((a - b) / b) * 100));
+
+  // Comision de cada vendedora, mes por mes. Se calcula igual que la fila
+  // "Comision" de arriba — el % que cada una tiene hoy — asi el desglose suma
+  // exactamente el total y no aparecen diferencias entre las dos filas.
+  // Las ventas sin vendedora conocida no cuentan ni aca ni alla.
+  const comVendMes = (() => {
+    const m = {};
+    ventas.forEach(v => {
+      const k = getMonthKey(v.fecha);
+      if (!k) return;
+      const vid = v.vendedora_id || v.vendedoraId;
+      const vend = vendedoras.find(x => x.id === vid);
+      if (!vend) return;
+      if (!m[vid]) m[vid] = {};
+      m[vid][k] = (m[vid][k] || 0) + Number(v.total || 0) * vend.comision / 100;
+    });
+    return m;
+  })();
+  const cvm = (vid, a, i) => (comVendMes[vid] || {})[`${a}-${String(i + 1).padStart(2, "0")}`] || 0;
+  const totComVend = (vid, a) => MESES.reduce((sum, _, i) => sum + cvm(vid, a, i), 0);
+
+  // Solo las que cobraron algo en alguno de los dos anios: una vendedora al 0%
+  // (o que todavia no vendio) seria una fila entera de guiones.
+  const vendConComision = vendedoras.filter(
+    v => totComVend(v.id, anio) > 0 || totComVend(v.id, anioAnt) > 0);
 
   const anioAnt = anio - 1;
   const totVA = sumaAnio(anio, "total"), totVB = sumaAnio(anioAnt, "total");
@@ -1565,6 +1591,12 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
                      cursor: "pointer", fontFamily: "inherit" }}>
             {verPct ? "✓ " : ""}variación
           </button>
+          <button onClick={() => setVerVend(v => !v)}
+            style={{ background: verVend ? "#A85D43" : "#FFF8F5", color: verVend ? "#fff" : "#5A3828",
+                     border: "1px solid #D4A090", borderRadius: 7, padding: "5px 11px", fontSize: 11,
+                     cursor: "pointer", fontFamily: "inherit" }}>
+            {verVend ? "✓ " : ""}por vendedor/a
+          </button>
         </div>
       </div>
 
@@ -1611,6 +1643,22 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
               {MESES.map((_, i) => celda(dm(anio, i).comision, esFuturo(anio, i), { color: "#A85D43" }))}
               <td style={{ ...tdTotal, color: "#A85D43" }}>{fmtCorto(totCA) || "—"}</td>
             </tr>
+
+            {/* Quien se llevo cada peso de esa comision. Suma la fila de arriba. */}
+            {verVend && vendConComision.map(v => (
+              <tr key={"cv" + v.id} style={{ background: "#FFFBF9" }}>
+                <td style={{ ...tdLabel, background: "#FFFBF9", fontSize: 12, fontWeight: 600, color: "#6B4A3E",
+                             paddingLeft: 26 }}>
+                  <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%",
+                                 background: v.color || "#A85D43", marginRight: 7 }} />
+                  {v.nombre} <span style={{ color: "#9A7570", fontWeight: 500, fontSize: 11 }}>{v.comision}%</span>
+                </td>
+                {MESES.map((_, i) => celda(cvm(v.id, anio, i), esFuturo(anio, i), { color: v.color || "#A85D43" }))}
+                <td style={{ ...tdTotal, fontSize: 13, color: v.color || "#A85D43" }}>
+                  {fmtCorto(totComVend(v.id, anio)) || "—"}
+                </td>
+              </tr>
+            ))}
             <tr style={{ borderBottom: "2px solid #E8C4B0" }}>
               <td style={{ ...tdLabel, background: "#FFFDFB", fontSize: 13, fontWeight: 600, color: "#B89080" }}>
                 Comisión <span style={{ color: "#9A7570", fontWeight: 500 }}>{anioAnt}</span>
@@ -3330,6 +3378,7 @@ function Historial({ ventas, vendedoras, fmtPeso, MESES, getMonthKey, cambiarVen
   const [filtroAnio, setFiltroAnio] = useState("all");
   const [filtroMes, setFiltroMes] = useState("all");
   const [busqueda, setBusqueda] = useState("");
+  const [verTodosMeses, setVerTodosMeses] = useState(false);
 
   const allMonthKeys = [...new Set(ventas.map(v => getMonthKey(v.fecha)))].filter(Boolean).sort().reverse();
   const anios = [...new Set(allMonthKeys.map(m => m.split("-")[0]))].sort().reverse();
@@ -3345,6 +3394,36 @@ function Historial({ ventas, vendedoras, fmtPeso, MESES, getMonthKey, cambiarVen
     if (busqueda.trim() && !(v.cliente || "").toLowerCase().includes(busqueda.trim().toLowerCase())) return false;
     return true;
   });
+
+  // Comision por mes y por vendedora de lo que se esta viendo. Respeta los filtros
+  // a proposito: si se filtra un mes o una vendedora, el cuadro acompana. El % es
+  // el que cada una tiene hoy, el mismo criterio que usan Resumen y Comisiones.
+  const comHist = (() => {
+    const m = {};
+    filtradas.forEach(v => {
+      const k = getMonthKey(v.fecha);
+      if (!k) return;
+      const vend = vendedoras.find(x => x.id === (v.vendedora_id || v.vendedoraId));
+      if (!vend) return;
+      if (!m[k]) m[k] = {};
+      m[k][vend.id] = (m[k][vend.id] || 0) + Number(v.total || 0) * vend.comision / 100;
+    });
+    return m;
+  })();
+  // Mes mas nuevo arriba: es el que se mira.
+  const mesesHist = Object.keys(comHist).sort().reverse();
+  const MESES_A_LA_VISTA = 12;
+  const mesesVisibles = verTodosMeses ? mesesHist : mesesHist.slice(0, MESES_A_LA_VISTA);
+  const vendsHist = vendedoras.filter(v => mesesHist.some(k => (comHist[k][v.id] || 0) > 0));
+  // Los centavos de un 3% no le importan a nadie y ensucian la tabla.
+  const pesos = (x) => fmtPeso(Math.round(x));
+  const comMes = (k) => vendsHist.reduce((sum, v) => sum + (comHist[k][v.id] || 0), 0);
+  const comVendTotal = (vid) => mesesHist.reduce((sum, k) => sum + (comHist[k][vid] || 0), 0);
+  const comTotal = mesesHist.reduce((sum, k) => sum + comMes(k), 0);
+  const nombreMes = (k) => {
+    const [a, mm] = k.split("-");
+    return `${MESES[parseInt(mm, 10) - 1]} ${a}`;
+  };
 
   // Mapa cliente -> vendedoras que lo atendieron alguna vez (sobre TODAS las ventas)
   const vendedorasPorCliente = (() => {
@@ -3438,6 +3517,88 @@ function Historial({ ventas, vendedoras, fmtPeso, MESES, getMonthKey, cambiarVen
               El pago que ya se hizo no se tocó: esa plata salió de verdad. Los dos saldos se compensan entre sí.
             </p>
           )}
+        </div>
+      )}
+
+      {/* Cuanto se llevo cada vendedor/a, mes por mes, de lo que esta a la vista */}
+      {vendsHist.length > 0 && (
+        <div className="card" style={{ padding: 0, overflowX: "auto" }}>
+          <div style={{ padding: "12px 16px", borderBottom: "1px solid #F4E6DE" }}>
+            <span style={{ fontSize: 11, color: "#6B4A3E", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+              Comisión por mes
+            </span>
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid #E8C4B0" }}>
+                <th style={{ padding: "8px 16px", textAlign: "left", fontSize: 11, fontWeight: 600,
+                             color: "#7A5848", whiteSpace: "nowrap" }}>Mes</th>
+                {vendsHist.map(v => (
+                  <th key={v.id} style={{ padding: "8px 10px", textAlign: "right", fontSize: 11, fontWeight: 700,
+                                          color: v.color || "#A85D43", whiteSpace: "nowrap" }}>
+                    {v.nombre} <span style={{ color: "#9A7570", fontWeight: 500 }}>{v.comision}%</span>
+                  </th>
+                ))}
+                <th style={{ padding: "8px 16px", textAlign: "right", fontSize: 10, fontWeight: 600,
+                             color: "#7A5848", textTransform: "uppercase", letterSpacing: "0.06em",
+                             borderLeft: "2px solid #E8C4B0", whiteSpace: "nowrap" }}>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mesesVisibles.map(k => (
+                <tr key={k} style={{ borderBottom: "1px solid #F4E6DE" }}>
+                  <td style={{ padding: "8px 16px", fontSize: 12, fontWeight: 600, color: "#2C1A14",
+                               whiteSpace: "nowrap" }}>{nombreMes(k)}</td>
+                  {vendsHist.map(v => (
+                    <td key={v.id} style={{ padding: "8px 10px", textAlign: "right", fontSize: 12,
+                                            whiteSpace: "nowrap",
+                                            color: (comHist[k][v.id] || 0) ? (v.color || "#A85D43") : "#D8C4BA" }}>
+                      {(comHist[k][v.id] || 0) ? pesos(comHist[k][v.id]) : "—"}
+                    </td>
+                  ))}
+                  <td style={{ padding: "8px 16px", textAlign: "right", fontSize: 12, fontWeight: 700,
+                               color: "#2C1A14", borderLeft: "2px solid #E8C4B0", whiteSpace: "nowrap" }}>
+                    {pesos(comMes(k))}
+                  </td>
+                </tr>
+              ))}
+              {mesesHist.length > 1 && (
+                <tr style={{ background: "#FFF8F5", borderTop: "2px solid #E8C4B0" }}>
+                  <td style={{ padding: "8px 16px", fontSize: 11, fontWeight: 700, color: "#7A5848",
+                               textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                    Total <span style={{ textTransform: "none", fontWeight: 500, color: "#9A7570" }}>
+                      ({mesesHist.length} {mesesHist.length === 1 ? "mes" : "meses"})</span>
+                  </td>
+                  {vendsHist.map(v => (
+                    <td key={v.id} style={{ padding: "8px 10px", textAlign: "right", fontSize: 12,
+                                            fontWeight: 700, color: v.color || "#A85D43", whiteSpace: "nowrap" }}>
+                      {pesos(comVendTotal(v.id))}
+                    </td>
+                  ))}
+                  <td style={{ padding: "8px 16px", textAlign: "right", fontSize: 13, fontWeight: 700,
+                               color: "#2C1A14", borderLeft: "2px solid #E8C4B0", whiteSpace: "nowrap" }}>
+                    {pesos(comTotal)}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+          <div style={{ borderTop: "1px solid #F4E6DE", padding: "8px 16px" }}>
+            {mesesHist.length > MESES_A_LA_VISTA && (
+              <button onClick={() => setVerTodosMeses(v => !v)}
+                style={{ background: "none", border: "none", color: "#A85D43", cursor: "pointer",
+                         fontSize: 11, padding: "2px 0 6px 0", textDecoration: "underline",
+                         fontFamily: "inherit", fontWeight: 600, display: "block" }}>
+                {verTodosMeses
+                  ? `ver solo los últimos ${MESES_A_LA_VISTA} meses`
+                  : `ver los ${mesesHist.length} meses`}
+              </button>
+            )}
+            <p style={{ fontSize: 10, color: "#7A5848", margin: 0 }}>
+              Calculado sobre las ventas que estás viendo, con el % actual de cada vendedor/a ·
+              esto es lo que le corresponde, no lo que ya se le pagó (eso está en Comisiones)
+            </p>
+          </div>
         </div>
       )}
 
