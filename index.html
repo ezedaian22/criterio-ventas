@@ -1449,7 +1449,7 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
   const mesHoy = new Date().getMonth();
   const [anio, setAnio] = useState(anioHoy);
   const [verPct, setVerPct] = useState(true);
-  const [verVend, setVerVend] = useState(true);
+  const [verVend, setVerVend] = useState(false);
 
   const fmtCorto = (n) => {
     const v = Number(n || 0);
@@ -1644,21 +1644,6 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
               <td style={{ ...tdTotal, color: "#A85D43" }}>{fmtCorto(totCA) || "—"}</td>
             </tr>
 
-            {/* Quien se llevo cada peso de esa comision. Suma la fila de arriba. */}
-            {verVend && vendConComision.map(v => (
-              <tr key={"cv" + v.id} style={{ background: "#FFFBF9" }}>
-                <td style={{ ...tdLabel, background: "#FFFBF9", fontSize: 12, fontWeight: 600, color: "#6B4A3E",
-                             paddingLeft: 26 }}>
-                  <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%",
-                                 background: v.color || "#A85D43", marginRight: 7 }} />
-                  {v.nombre} <span style={{ color: "#9A7570", fontWeight: 500, fontSize: 11 }}>{v.comision}%</span>
-                </td>
-                {MESES.map((_, i) => celda(cvm(v.id, anio, i), esFuturo(anio, i), { color: v.color || "#A85D43" }))}
-                <td style={{ ...tdTotal, fontSize: 13, color: v.color || "#A85D43" }}>
-                  {fmtCorto(totComVend(v.id, anio)) || "—"}
-                </td>
-              </tr>
-            ))}
             <tr style={{ borderBottom: "2px solid #E8C4B0" }}>
               <td style={{ ...tdLabel, background: "#FFFDFB", fontSize: 13, fontWeight: 600, color: "#B89080" }}>
                 Comisión <span style={{ color: "#9A7570", fontWeight: 500 }}>{anioAnt}</span>
@@ -1732,6 +1717,61 @@ function Resumen({ ventas, vendedoras, fmtPeso, MESES, getMonthKey }) {
           </tbody>
         </table>
       </div>
+
+      {/* Quien se llevo cada peso de la comision. En su propio cuadro: adentro de
+          la tabla de arriba la hacia el doble de alta y no se leia nada. */}
+      {verVend && vendConComision.length > 0 && (
+        <div className="card" style={{ padding: 0, overflowX: "auto" }}>
+          <div style={{ padding: "10px 16px", borderBottom: "1px solid #F4E6DE",
+                        display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <span style={{ fontSize: 11, color: "#6B4A3E", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+              Comisión por vendedor/a <span style={{ color: "#9A7570" }}>{anio}</span>
+            </span>
+            <button onClick={() => setVerVend(false)}
+              style={{ background: "none", border: "none", color: "#A85D43", cursor: "pointer",
+                       fontSize: 11, fontFamily: "inherit", textDecoration: "underline" }}>cerrar</button>
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 820 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid #E8C4B0" }}>
+                <th style={{ ...tdLabel, background: "#FFFDFB" }}></th>
+                {MESES.map((m, i) => (
+                  <th key={i} style={{ padding: "6px 4px", textAlign: "center", borderLeft: "1px solid #F4E6DE",
+                                       fontSize: 10, fontWeight: 700,
+                                       color: (anio === anioHoy && i === mesHoy) ? "#A85D43" : "#7A5848",
+                                       background: (anio === anioHoy && i === mesHoy) ? "#FFE4D6" : "transparent" }}>
+                    {m}
+                  </th>
+                ))}
+                <th style={{ ...tdTotal, fontSize: 10, color: "#7A5848", textTransform: "uppercase",
+                             letterSpacing: "0.06em", fontWeight: 600 }}>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {vendConComision.map(v => (
+                <tr key={"cv" + v.id} style={{ borderBottom: "1px solid #F8EEE8" }}>
+                  <td style={{ ...tdLabel, background: "#FFFDFB", fontSize: 12, fontWeight: 600, color: "#2C1A14" }}>
+                    <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%",
+                                   background: v.color || "#A85D43", marginRight: 7 }} />
+                    {v.nombre} <span style={{ color: "#9A7570", fontWeight: 500, fontSize: 11 }}>{v.comision}%</span>
+                  </td>
+                  {MESES.map((_, i) => celda(cvm(v.id, anio, i), esFuturo(anio, i), { color: v.color || "#A85D43" }))}
+                  <td style={{ ...tdTotal, fontSize: 13, color: v.color || "#A85D43" }}>
+                    {fmtCorto(totComVend(v.id, anio)) || "—"}
+                  </td>
+                </tr>
+              ))}
+              {/* Tiene que dar igual que la fila Comision de arriba: si no, hay algo mal */}
+              <tr style={{ background: "#FFF8F5", borderTop: "2px solid #E8C4B0" }}>
+                <td style={{ ...tdLabel, background: "#FFF8F5", fontSize: 11, fontWeight: 700, color: "#7A5848",
+                             textTransform: "uppercase", letterSpacing: "0.06em" }}>Total</td>
+                {MESES.map((_, i) => celda(dm(anio, i).comision, esFuturo(anio, i), { color: "#A85D43" }))}
+                <td style={{ ...tdTotal, color: "#A85D43" }}>{fmtCorto(totCA) || "—"}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {ventasConCosto === 0 && (
         <div style={{ background: "#FFF4E6", border: "1px solid #E8C4B0", borderRadius: 8, padding: "10px 14px" }}>
